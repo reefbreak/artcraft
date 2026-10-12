@@ -114,6 +114,17 @@ impl PriceBook {
     Some(self.get(model, base))
   }
 
+  /// A Lyria clip (Lyria 2 makes 30 seconds per clip).
+  pub fn lyria_per_clip(&self, model: &str) -> Option<f64> {
+    let base = match model {
+      "lyria-002" => 0.06,
+      "lyria-3-clip-preview" => 0.04,
+      "lyria-3-pro-preview" => 0.08,
+      _ => return None,
+    };
+    Some(self.get(model, base))
+  }
+
   /// A Jev routing call: input tokens only (output is free).
   pub fn jev_call(&self, input_tokens: u64) -> f64 {
     input_tokens as f64 * self.get("jev.input", 0.042) / MILLION

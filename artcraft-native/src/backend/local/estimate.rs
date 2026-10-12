@@ -88,6 +88,7 @@ pub fn model_cost(prices: &PriceBook, model: &LocalModel, request: &Request) -> 
       (output + input) * batch
     },
     Route::Stability { model: upstream } => prices.stability_per_image(upstream).unwrap_or(0.0) * batch,
+    Route::Lyria { model: upstream } => prices.lyria_per_clip(upstream).unwrap_or(0.0) * batch,
     Route::Veo { model: upstream } => {
       let resolution = resolution.and_then(catalog::video_resolution);
       let seconds = f64::from(veo_duration(model, request, resolution).unwrap_or(VEO_HD_SECONDS));

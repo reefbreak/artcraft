@@ -107,9 +107,9 @@ impl LocalEngine {
     let models = match modality {
       Modality::Image => catalog::image_models(&self.config),
       Modality::Video => catalog::video_models(&self.config),
-      Modality::Audio => Vec::new(),
+      Modality::Audio => catalog::audio_models(&self.config),
     };
-    if models.is_empty() && modality != Modality::Audio {
+    if models.is_empty() {
       warn!("No {modality:?} models: add your accounts to ~/Artcraft/settings/local_providers.json");
     }
     Ok(models)
@@ -256,6 +256,13 @@ impl LocalEngine {
         let cost = each * files.len() as f64;
         (files, cost, basis, Account::Bedrock, upstream)
       },
+      Route::Lyria { model: upstream } => {
+        let files = self.vertex.generate_music(upstream, &request.prompt, request.negative_prompt.as_deref(), request.batch_count).await?;
+        let each = self.prices.lyria_per_clip(upstream).unwrap_or(0.0);
+        let basis = format!("{} clip{} \u{d7} ${each:.2}", files.len(), plural(files.len()));
+        let cost = each * files.len() as f64;
+        (files, cost, basis, Account::Vertex, upstream)
+      },
       Route::Veo { model: upstream } => {
         let resolution = resolution.and_then(catalog::video_resolution);
         // Veo makes 1080p and 4K only as 8-second clips.
@@ -270,7 +277,11 @@ impl LocalEngine {
       },
     };
     self.charge(tx, vec![(account, cost, upstream.to_owned())], &batch);
-    let class = if modality == Modality::Video { MediaClass::Video } else { MediaClass::Image };
+    let class = match modality {
+      Modality::Video => MediaClass::Video,
+      Modality::Audio => MediaClass::Audio,
+      Modality::Image => MediaClass::Image,
+    };
     // Saving writes files (and runs FFmpeg for video posters): keep it off the async workers.
     let saved: Vec<MediaFile> = tokio::task::block_in_place(|| files.iter().map(|f| self.library.add(NewFile { bytes: &f.bytes, extension: f.extension, class, origin: Origin::Generated, maybe_batch_token: Some(&batch), maybe_prompt_token: prompt_token.as_deref(), maybe_model_id: Some(&model.info.id) })).collect::<anyhow::Result<_>>())?;
     let record = generation_record(&self.config, request, &decision, &batch, upstream, cost, routing_cost, basis, saved.len(), started);

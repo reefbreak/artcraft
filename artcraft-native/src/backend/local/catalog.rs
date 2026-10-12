@@ -31,12 +31,14 @@ pub enum Route {
   Veo { model: &'static str },
   /// Bedrock `InvokeModel` with a Stability model.
   Stability { model: &'static str },
+  /// Vertex `predict` with a Lyria music model.
+  Lyria { model: &'static str },
 }
 
 impl Route {
   pub fn provider_label(self) -> &'static str {
     match self {
-      Route::GeminiImage { .. } | Route::Veo { .. } => "Vertex AI",
+      Route::GeminiImage { .. } | Route::Veo { .. } | Route::Lyria { .. } => "Vertex AI",
       Route::Stability { .. } => "Bedrock",
     }
   }
@@ -85,9 +87,23 @@ pub fn video_candidates(config: &LocalConfig) -> Vec<LocalModel> {
   vec![veo("veo_3p1_fast_vertex", "Veo 3.1 Fast", "veo-3.1-fast-generate-001", &["seven_twenty_p", "ten_eighty_p"], 60.0, "good quality at lower cost and latency; most everyday shots"), veo("veo_3p1_vertex", "Veo 3.1", "veo-3.1-generate-001", &["seven_twenty_p", "ten_eighty_p", "four_k"], 120.0, "best motion, physics, lip-synced dialogue and cinematic detail; hero shots and 4K"), veo("veo_3p1_lite_vertex", "Veo 3.1 Lite", "veo-3.1-lite-generate-001", &["seven_twenty_p"], 40.0, "cheapest and quickest; previz, animatics and drafts at 720p")]
 }
 
+/// The music models (Lyria 2 on Vertex: 30-second instrumental clips). Lyria 3 is in preview
+/// behind an allowlist, so it isn't offered by default.
+pub fn audio_models(config: &LocalConfig) -> Vec<ModelInfo> {
+  audio_candidates(config).into_iter().map(|m| m.info).collect()
+}
+
+pub fn audio_candidates(config: &LocalConfig) -> Vec<LocalModel> {
+  if !config.veo_enabled() {
+    return Vec::new();
+  }
+  let info = ModelInfo { id: "lyria_2_vertex".to_owned(), name: "Lyria 2".to_owned(), description: "30-second instrumental music \u{b7} your Vertex AI account".to_owned(), creator: "google".to_owned(), family: "Lyria".to_owned(), prompt_supported: true, expected_secs: 25.0, ..Default::default() };
+  vec![LocalModel { info, route: Route::Lyria { model: "lyria-002" }, strengths: "instrumental music from a description of genre, mood and instruments" }]
+}
+
 /// The concrete model behind `id` (not the Auto entries).
 pub fn find(config: &LocalConfig, id: &str) -> Option<LocalModel> {
-  image_candidates(config).into_iter().chain(video_candidates(config)).find(|m| m.info.id == id)
+  image_candidates(config).into_iter().chain(video_candidates(config)).chain(audio_candidates(config)).find(|m| m.info.id == id)
 }
 
 /// A UI aspect ratio id as the providers write it (`wide_sixteen_by_nine` → `16:9`).

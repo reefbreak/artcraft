@@ -27,6 +27,8 @@ pub struct Request {
   pub end_frame: Option<String>,
   pub duration_seconds: Option<u16>,
   pub generate_audio: Option<bool>,
+  /// What to keep out (Lyria's negative prompt).
+  pub negative_prompt: Option<String>,
 }
 
 impl Request {
@@ -36,7 +38,7 @@ impl Request {
     let batch_key = if modality == Modality::Video { "video_batch_count" } else { "image_batch_count" };
     let mut image_tokens: Vec<String> = tokens("image_media_tokens");
     image_tokens.extend(tokens("reference_image_media_tokens"));
-    Self { model_id: string("model").unwrap_or_default(), prompt: string("prompt").unwrap_or_default(), aspect_ratio: string("aspect_ratio"), resolution: string("resolution"), batch_count: fields.get(batch_key).and_then(Value::as_u64).map_or(1, |n| n.clamp(1, 8) as u16), image_tokens, start_frame: string("start_frame_image_media_token"), end_frame: string("end_frame_image_media_token"), duration_seconds: fields.get("duration_seconds").and_then(Value::as_u64).map(|n| n as u16), generate_audio: fields.get("generate_audio").and_then(Value::as_bool) }
+    Self { model_id: string("model").unwrap_or_default(), prompt: string("prompt").unwrap_or_default(), aspect_ratio: string("aspect_ratio"), resolution: string("resolution"), batch_count: fields.get(batch_key).and_then(Value::as_u64).map_or(1, |n| n.clamp(1, 8) as u16), image_tokens, start_frame: string("start_frame_image_media_token"), end_frame: string("end_frame_image_media_token"), duration_seconds: fields.get("duration_seconds").and_then(Value::as_u64).map(|n| n as u16), generate_audio: fields.get("generate_audio").and_then(Value::as_bool), negative_prompt: string("negative_prompt") }
   }
 
   /// What Jev sees about the request.
@@ -171,7 +173,8 @@ pub fn plan(config: &LocalConfig, modality: Modality, request: &Request) -> Opti
 fn all_candidates(config: &LocalConfig, modality: Modality) -> Vec<LocalModel> {
   match modality {
     Modality::Video => catalog::video_candidates(config),
-    _ => catalog::image_candidates(config),
+    Modality::Audio => catalog::audio_candidates(config),
+    Modality::Image => catalog::image_candidates(config),
   }
 }
 

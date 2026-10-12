@@ -133,6 +133,17 @@ impl VertexClient {
     Ok(out)
   }
 
+  /// Makes `count` music clips with Lyria (`predict`, in the video region).
+  pub async fn generate_music(&self, model: &str, prompt: &str, negative_prompt: Option<&str>, count: u16) -> anyhow::Result<Vec<GeneratedFile>> {
+    let project = self.config.gcp_project.as_deref().ok_or_else(|| anyhow::anyhow!("Lyria needs a Google Cloud project in local_providers.json"))?;
+    let location = &self.config.gcp_video_location;
+    let url = format!("{}v1/projects/{project}/locations/{location}/publishers/google/models/{model}:predict", self.host(location));
+    let response = self.post_with_token(&url, &lyria_body(prompt, negative_prompt, count), IMAGE_TIMEOUT).await?;
+    let clips: Vec<GeneratedFile> = response.get("predictions").and_then(Value::as_array).into_iter().flatten().filter_map(|p| p.get("bytesBase64Encoded").and_then(Value::as_str)).filter_map(|data| BASE64.decode(data).ok()).map(|bytes| GeneratedFile { bytes, extension: "wav", usage: None }).collect();
+    anyhow::ensure!(!clips.is_empty(), "Lyria returned no audio (the prompt may have been blocked)");
+    Ok(clips)
+  }
+
   /// Reads `gs://bucket/object` with the same credentials.
   async fn download_gcs(&self, uri: &str) -> anyhow::Result<Vec<u8>> {
     let (bucket, object) = uri.strip_prefix("gs://").and_then(|rest| rest.split_once('/')).ok_or_else(|| anyhow::anyhow!("Unexpected GCS URI {uri}"))?;
@@ -183,6 +194,19 @@ fn gemini_image_body(request: &GeminiImageRequest<'_>) -> Value {
     "contents": [{ "role": "user", "parts": parts }],
     "generationConfig": { "responseModalities": ["TEXT", "IMAGE"], "imageConfig": image_config },
   })
+}
+
+/// Lyria 2's request: the count goes inside the instance (Google's samples), not in parameters.
+fn lyria_body(prompt: &str, negative_prompt: Option<&str>, count: u16) -> Value {
+  let mut instance = serde_json::Map::new();
+  instance.insert("prompt".into(), json!(prompt));
+  if let Some(negative) = negative_prompt.filter(|n| !n.trim().is_empty()) {
+    instance.insert("negative_prompt".into(), json!(negative));
+  }
+  if count > 1 {
+    instance.insert("sample_count".into(), json!(count));
+  }
+  json!({ "instances": [instance], "parameters": {} })
 }
 
 fn veo_body(request: &VeoRequest<'_>) -> Value {
@@ -298,6 +322,12 @@ mod tests {
     assert_eq!((image.bytes, image.extension), (vec![1, 2, 3], "jpg"));
     let blocked = json!({ "candidates": [{ "finishReason": "IMAGE_SAFETY", "content": { "parts": [] } }] });
     assert!(first_image(&blocked).unwrap_err().to_string().contains("IMAGE_SAFETY"));
+  }
+
+  #[test]
+  fn lyria_requests_put_the_count_in_the_instance() {
+    assert_eq!(lyria_body("calm piano", Some("drums"), 2), json!({ "instances": [{ "prompt": "calm piano", "negative_prompt": "drums", "sample_count": 2 }], "parameters": {} }));
+    assert_eq!(lyria_body("x", Some(" "), 1), json!({ "instances": [{ "prompt": "x" }], "parameters": {} }));
   }
 
   #[test]
