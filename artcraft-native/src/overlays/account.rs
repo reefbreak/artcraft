@@ -111,7 +111,8 @@ pub enum SettingsAction {
 
 /// The settings dialog (Settings → Misc and Accounts in the webapp). `fal_key` is the key being
 /// typed.
-pub fn settings_dialog(ctx: &egui::Context, enter_to_generate: &mut bool, username: Option<&str>, credits: Option<u64>, accounts: &AccountsView, fal_key: &mut String, data_root: &std::path::Path) -> Option<SettingsAction> {
+/// `local` is local mode's provider status (it replaces the ArtCraft account sections).
+pub fn settings_dialog(ctx: &egui::Context, enter_to_generate: &mut bool, username: Option<&str>, credits: Option<u64>, accounts: &AccountsView, fal_key: &mut String, data_root: &std::path::Path, local: Option<&[(&'static str, String, bool)]>) -> Option<SettingsAction> {
   let mut action = None;
   let close = widgets::modal(ctx, Id::new("settings"), 520.0, |ui| {
     ui.horizontal(|ui| {
@@ -138,35 +139,39 @@ pub fn settings_dialog(ctx: &egui::Context, enter_to_generate: &mut bool, userna
       });
     });
     ui.add_space(18.0);
-    widgets::hud(ui, "Account", theme::FAINT);
-    ui.add_space(6.0);
-    match username {
-      Some(user) => {
-        ui.label(egui::RichText::new(format!("Signed in as @{user}")).size(14.0));
-        if let Some(c) = credits {
-          ui.label(egui::RichText::new(format!("{} credits", group_thousands(c))).size(12.5).color(theme::MUTED));
-        }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-          if widgets::button(ui, Some(Icon::Gem), "Buy credits", widgets::Kind::Accent, 0.0, theme::CONTROL_H).clicked() {
-            ui.ctx().open_url(egui::OpenUrl::new_tab(format!("{WEB_APP_URL}/pricing")));
+    if let Some(lines) = local {
+      local_section(ui, lines, data_root);
+    } else {
+      widgets::hud(ui, "Account", theme::FAINT);
+      ui.add_space(6.0);
+      match username {
+        Some(user) => {
+          ui.label(egui::RichText::new(format!("Signed in as @{user}")).size(14.0));
+          if let Some(c) = credits {
+            ui.label(egui::RichText::new(format!("{} credits", group_thousands(c))).size(12.5).color(theme::MUTED));
           }
-          if widgets::button(ui, Some(Icon::LogOut), "Log out", widgets::Kind::Secondary, 0.0, theme::CONTROL_H).clicked() {
-            action = Some(SettingsAction::SignOut);
+          ui.add_space(8.0);
+          ui.horizontal(|ui| {
+            if widgets::button(ui, Some(Icon::Gem), "Buy credits", widgets::Kind::Accent, 0.0, theme::CONTROL_H).clicked() {
+              ui.ctx().open_url(egui::OpenUrl::new_tab(format!("{WEB_APP_URL}/pricing")));
+            }
+            if widgets::button(ui, Some(Icon::LogOut), "Log out", widgets::Kind::Secondary, 0.0, theme::CONTROL_H).clicked() {
+              action = Some(SettingsAction::SignOut);
+            }
+          });
+        },
+        None => {
+          if widgets::button(ui, Some(Icon::LogIn), "Sign in", widgets::Kind::Primary, 0.0, theme::CONTROL_H).clicked() {
+            action = Some(SettingsAction::SignIn);
           }
-        });
-      },
-      None => {
-        if widgets::button(ui, Some(Icon::LogIn), "Sign in", widgets::Kind::Primary, 0.0, theme::CONTROL_H).clicked() {
-          action = Some(SettingsAction::SignIn);
-        }
-      },
-    }
-    ui.add_space(18.0);
-    widgets::hud(ui, "Provider accounts", theme::FAINT);
-    ui.add_space(6.0);
-    if let Some(account) = accounts_section(ui, accounts, fal_key) {
-      action = Some(SettingsAction::Account(account));
+        },
+      }
+      ui.add_space(18.0);
+      widgets::hud(ui, "Provider accounts", theme::FAINT);
+      ui.add_space(6.0);
+      if let Some(account) = accounts_section(ui, accounts, fal_key) {
+        action = Some(SettingsAction::Account(account));
+      }
     }
     ui.add_space(18.0);
     widgets::hud(ui, "About", theme::FAINT);
@@ -182,6 +187,28 @@ pub fn settings_dialog(ctx: &egui::Context, enter_to_generate: &mut bool, userna
     action = Some(SettingsAction::Close);
   }
   action
+}
+
+/// Local mode: which of the user's own cloud accounts are set up, and where to change that.
+fn local_section(ui: &mut Ui, lines: &[(&'static str, String, bool)], data_root: &std::path::Path) {
+  widgets::hud(ui, "Local mode \u{b7} your own accounts", theme::FAINT);
+  ui.add_space(6.0);
+  for (name, detail, on) in lines {
+    ui.horizontal(|ui| {
+      ui.label(egui::RichText::new(if *on { "\u{25cf}" } else { "\u{25cb}" }).size(12.0).color(if *on { theme::ACCENT } else { theme::FAINT }));
+      ui.label(egui::RichText::new(*name).size(14.0).family(theme::medium()));
+    });
+    ui.label(egui::RichText::new(detail).size(12.5).color(theme::MUTED));
+    ui.add_space(4.0);
+  }
+  ui.label(egui::RichText::new("Generations bill your Google Cloud and AWS accounts directly. Edit the settings file, then restart the app.").size(12.5).color(theme::MUTED));
+  ui.add_space(8.0);
+  if widgets::button(ui, Some(Icon::Folder), "Edit local_providers.json", widgets::Kind::Secondary, 0.0, theme::CONTROL_H).clicked() {
+    let path = crate::backend::local::config::config_path(data_root);
+    if let Err(err) = open::that(&path) {
+      log::warn!("Couldn't open {}: {err}", path.display());
+    }
+  }
 }
 
 /// A single-line input on the sunken surface with a hairline (and a blue line while focused).

@@ -40,6 +40,9 @@ struct VideoInfo {
 
 pub struct VideoPlayer {
   url: String,
+  /// What FFmpeg reads: the URL, or for local-mode `file://` links the plain path (FFmpeg doesn't
+  /// percent-decode `file://` URLs, and Windows drive paths don't survive them).
+  source: String,
   probe: Option<Receiver<Result<VideoInfo, String>>>,
   info: Option<VideoInfo>,
   stream: Option<Stream>,
@@ -75,11 +78,12 @@ impl VideoPlayer {
   /// Starts probing `url`; playback begins as soon as its size is known.
   pub fn new(url: &str) -> Self {
     let (tx, rx) = channel();
-    let probe_url = url.to_owned();
+    let source = ffmpeg_source(url);
+    let probe_url = source.clone();
     std::thread::spawn(move || {
       let _ = tx.send(probe(&probe_url));
     });
-    Self { url: url.to_owned(), probe: Some(rx), info: None, stream: None, texture: None, position: 0.0, muted: false, error: None, output: None }
+    Self { url: url.to_owned(), source, probe: Some(rx), info: None, stream: None, texture: None, position: 0.0, muted: false, error: None, output: None }
   }
 
   pub fn url(&self) -> &str {
@@ -241,7 +245,7 @@ impl VideoPlayer {
 
   fn spawn(&mut self, info: VideoInfo, start: f64) -> Result<Stream, String> {
     let (w, h) = output_size(info);
-    let mut video = command("ffmpeg").args(["-nostdin", "-loglevel", "error", "-ss", &format!("{start:.3}"), "-i", &self.url, "-an", "-vf", &format!("scale={w}:{h}"), "-f", "rawvideo", "-pix_fmt", "rgba", "-"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("ffmpeg: {e}"))?;
+    let mut video = command("ffmpeg").args(["-nostdin", "-loglevel", "error", "-ss", &format!("{start:.3}"), "-i", &self.source, "-an", "-vf", &format!("scale={w}:{h}"), "-f", "rawvideo", "-pix_fmt", "rgba", "-"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("ffmpeg: {e}"))?;
     let stdout = video.stdout.take().ok_or("ffmpeg has no output")?;
     let (frame_tx, frame_rx) = sync_channel(FRAME_QUEUE);
     let fps = info.fps.max(1.0);
@@ -253,7 +257,7 @@ impl VideoPlayer {
 
   /// The soundtrack as PCM into rodio (silently skipped when the clip has none).
   fn spawn_audio(&mut self, start: f64, children: &mut Vec<Child>) -> Option<Sink> {
-    let mut audio = command("ffmpeg").args(["-nostdin", "-loglevel", "error", "-ss", &format!("{start:.3}"), "-i", &self.url, "-vn", "-ac", "2", "-ar", &AUDIO_RATE.to_string(), "-f", "s16le", "-"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut audio = command("ffmpeg").args(["-nostdin", "-loglevel", "error", "-ss", &format!("{start:.3}"), "-i", &self.source, "-vn", "-ac", "2", "-ar", &AUDIO_RATE.to_string(), "-f", "s16le", "-"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     let mut stdout = audio.stdout.take()?;
     children.push(audio);
     if self.output.is_none() {
@@ -330,6 +334,11 @@ impl Source for PcmStream {
 
 /// Reads the clip's size, rate and length. A small probe keeps this ~2 s on CDN files instead of
 /// ~14 s (ffprobe otherwise scans much of the file over HTTP).
+/// The input FFmpeg should open for `url`.
+fn ffmpeg_source(url: &str) -> String {
+  crate::backend::local::library::file_path(url).map_or_else(|| url.to_owned(), |path| path.to_string_lossy().into_owned())
+}
+
 fn probe(url: &str) -> Result<VideoInfo, String> {
   #[derive(serde::Deserialize, Default)]
   #[serde(default)]
@@ -373,7 +382,7 @@ fn clock(secs: f64) -> String {
 }
 
 /// A command that doesn't flash a console window on Windows.
-fn command(program: &str) -> Command {
+pub(crate) fn command(program: &str) -> Command {
   #[allow(unused_mut)]
   let mut cmd = Command::new(program);
   #[cfg(windows)]
@@ -401,17 +410,18 @@ mod tests {
   #[test]
   #[ignore]
   fn probes_and_decodes_a_generated_clip() {
-    let dir = std::env::temp_dir().join("artcraft-native-video-test");
+    let dir = std::env::temp_dir().join("artcraft native video test"); // a space: file:// links percent-encode it
     std::fs::create_dir_all(&dir).unwrap();
     let clip = dir.join("clip.mp4");
     let status = command("ffmpeg").args(["-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=2:size=640x360:rate=24", "-f", "lavfi", "-i", "sine=duration=2", "-shortest", "-pix_fmt", "yuv420p"]).arg(&clip).status().unwrap();
     assert!(status.success());
-    let url = clip.to_string_lossy().into_owned();
-    let info = probe(&url).unwrap();
+    // A local-mode link: FFmpeg gets the plain path.
+    let url = crate::backend::local::library::file_url(&clip);
+    let info = probe(&ffmpeg_source(&url)).unwrap();
     assert_eq!((info.width, info.height), (640, 360));
     assert!((info.fps - 24.0).abs() < 0.01 && (info.duration - 2.0).abs() < 0.2);
 
-    let mut player = VideoPlayer { url: url.clone(), probe: None, info: Some(info), stream: None, texture: None, position: 0.0, muted: true, error: None, output: None };
+    let mut player = VideoPlayer { url: url.clone(), source: ffmpeg_source(&url), probe: None, info: Some(info), stream: None, texture: None, position: 0.0, muted: true, error: None, output: None };
     let stream = player.spawn(info, 1.0).unwrap();
     let (frame, pts) = stream.frames.recv_timeout(Duration::from_secs(10)).unwrap();
     assert_eq!(frame.size, [640, 360]);

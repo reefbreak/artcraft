@@ -180,15 +180,23 @@ impl MediaCache {
 }
 
 async fn download(http: &reqwest::Client, url: &str, animated: bool) -> Option<Decoded> {
-  let response = match http.get(url).send().await.and_then(|r| r.error_for_status()) {
-    Ok(response) => response,
+  let bytes = match fetch(http, url).await {
+    Ok(bytes) => bytes,
     Err(err) => {
       warn!("Image download failed for {url}: {err}");
       return None;
     },
   };
-  let bytes = response.bytes().await.ok()?;
   tokio::task::spawn_blocking(move || if animated { decode_frames(&bytes).map(Decoded::Frames).or_else(|| decode(&bytes).map(Decoded::Still)) } else { decode(&bytes).map(Decoded::Still) }).await.ok().flatten()
+}
+
+/// An image's bytes: read from disk for local-mode `file://` links, downloaded otherwise.
+async fn fetch(http: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
+  if let Some(path) = crate::backend::local::library::file_path(url) {
+    return tokio::fs::read(&path).await.map_err(|e| e.to_string());
+  }
+  let response = http.get(url).send().await.and_then(|r| r.error_for_status()).map_err(|e| e.to_string())?;
+  response.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
 }
 
 fn decode(bytes: &[u8]) -> Option<ColorImage> {

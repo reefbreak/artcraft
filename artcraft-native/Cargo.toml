@@ -21,6 +21,8 @@ tokens.workspace = true
 
 # External
 anyhow.workspace = true
+base64.workspace = true
+futures.workspace = true
 cookie.workspace = true
 chrono.workspace = true
 directories = "6.0.0"
@@ -42,6 +44,11 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "fs"] }
 url.workspace = true
 uuid = { workspace = true, features = ["v4"] }
+
+# Local mode: the user's own Google Cloud (Vertex AI) and AWS (Bedrock) accounts.
+aws-config = { version = "1.12", features = ["behavior-version-latest"] }
+aws-sdk-bedrockruntime = { version = "1.148", features = ["behavior-version-latest"] }
+gcp_auth = "0.12.7"
 
 # Pasting images from the clipboard (egui's own clipboard support is text only).
 arboard = { version = "3", default-features = false, features = ["image-data"] }

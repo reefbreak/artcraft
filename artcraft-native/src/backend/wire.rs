@@ -2,9 +2,9 @@
 //! has a default, so a new server-side value can't break decoding (the typed client structs use
 //! closed enums).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MediaLinks {
   pub cdn_url: String,
@@ -12,7 +12,7 @@ pub struct MediaLinks {
   pub maybe_video_previews: Option<VideoPreviews>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct VideoPreviews {
   pub still: String,
@@ -69,7 +69,7 @@ pub struct Pagination {
   pub total_page_count: u32,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct MediaFile {
   pub token: String,
@@ -228,7 +228,7 @@ pub struct PromptResponse {
   pub prompt: Prompt,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Prompt {
   pub token: String,
@@ -243,7 +243,7 @@ pub struct Prompt {
   pub maybe_context_images: Option<Vec<ContextImage>>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ContextImage {
   pub media_token: String,

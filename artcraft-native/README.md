@@ -25,6 +25,60 @@ The workspace's default member is the Tauri app, so pass `-p artcraft_native`.
   or a username and password.
 - **API host.** `~/Artcraft/settings/env_configs.json` selects it, exactly as for the Tauri app.
 
+## Local mode (your own cloud accounts)
+
+This fork runs in **local mode** by default: no ArtCraft sign-in, no credits, and no calls to
+ArtCraft's servers. Generations bill your own Google Cloud and AWS accounts, and the library lives
+on disk in `~/Artcraft/local/`. Set `ARTCRAFT_REMOTE=1` to get the stock ArtCraft account flow back.
+
+Configure it in `~/Artcraft/settings/local_providers.json` (written on first launch), or with
+environment variables, which win over the file:
+
+```json
+{
+  "gcp_project": "my-project",
+  "gcp_location": "global",
+  "gcp_video_location": "us-central1",
+  "aws_region": "us-west-2",
+  "aws_profile": "default",
+  "jev_api_key": "ts_...",
+  "jev_min_confidence": 0.35
+}
+```
+
+| Setting           | Environment variable                            | Notes                                                       |
+|-------------------|-------------------------------------------------|-------------------------------------------------------------|
+| `gcp_project`     | `ARTCRAFT_GCP_PROJECT` / `GOOGLE_CLOUD_PROJECT` | Vertex AI; auth via `gcloud auth application-default login` |
+| `gcp_api_key`     | `ARTCRAFT_GCP_API_KEY`                          | Express-mode key instead of a project; images only          |
+| `bedrock_enabled` | —                                               | Default: on when AWS credentials are found                  |
+| `aws_region`      | `ARTCRAFT_AWS_REGION`                           | Stability models are in `us-west-2`                         |
+| `aws_profile`     | `AWS_PROFILE`                                   | Any SDK credential source works (SSO, env, roles)           |
+| `jev_api_key`     | `ARTCRAFT_JEV_API_KEY` / `TYPESAFE_API_KEY`     | Turns on Jev routing for the Auto models                    |
+
+Models offered (only for the accounts that are set up):
+
+| Model              | Provider | Upstream ID                         |
+|--------------------|----------|-------------------------------------|
+| Nano Banana 2      | Vertex   | `gemini-3.1-flash-image`            |
+| Nano Banana Pro    | Vertex   | `gemini-3-pro-image`                |
+| Nano Banana 2 Lite | Vertex   | `gemini-3.1-flash-lite-image`       |
+| Stable Image Ultra | Bedrock  | `stability.stable-image-ultra-v1:1` |
+| SD 3.5 Large       | Bedrock  | `stability.sd3-5-large-v1:0`        |
+| Stable Image Core  | Bedrock  | `stability.stable-image-core-v1:1`  |
+| Veo 3.1 Fast       | Vertex   | `veo-3.1-fast-generate-001`         |
+| Veo 3.1            | Vertex   | `veo-3.1-generate-001`              |
+| Veo 3.1 Lite       | Vertex   | `veo-3.1-lite-generate-001`         |
+
+**Auto** (image and video) routes each request. Models that can't honor the settings (aspect
+ratio, resolution, reference count, frames, duration) are ruled out first. Jev then picks among
+the rest from the prompt and settings; below `jev_min_confidence`, or without a Jev key, the first
+fitting model in the order above is used (Nano Banana Pro when there are more than three
+references). A toast says which model ran and why.
+
+Not in local mode yet: audio models, characters, cost estimates, and Bedrock video (Amazon Nova
+Reel was retired on 2026-09-30; Luma Ray2 needs an S3 bucket). The code is in
+`src/backend/local/`.
+
 ## Architecture
 
 | Module             | What it does                                                                   |

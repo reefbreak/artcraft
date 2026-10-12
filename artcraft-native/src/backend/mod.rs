@@ -2,6 +2,7 @@
 //! [`Event`]s, which the UI drains once per frame; nothing here blocks the UI thread.
 
 pub mod audio;
+pub mod local;
 pub mod media_cache;
 pub mod providers;
 pub mod session;
@@ -38,6 +39,8 @@ use serde_json::{Map, Value};
 use tokens::tokens::media_files::MediaFileToken;
 
 use crate::feed::types::MediaKind;
+use local::LocalEngine;
+use local::config::LocalConfig;
 use crate::models::{self, ModelInfo};
 use providers::Provider;
 use providers::accounts::ProviderAccounts;
@@ -198,6 +201,8 @@ pub struct Backend {
   device_login_cancel: Arc<AtomicBool>,
   accounts: ProviderAccounts,
   jobs: JobStore,
+  /// Local mode: generations run on the user's own cloud accounts; no ArtCraft server calls.
+  local: Option<Arc<LocalEngine>>,
 }
 
 impl Backend {
@@ -211,7 +216,13 @@ impl Backend {
     let (accounts, jobs) = (ProviderAccounts::load(&root), JobStore::load(&root));
     let creds = Arc::new(RwLock::new(creds));
     rt.spawn(Worker { host: host.clone(), creds: creds.clone(), http: http.clone(), accounts: accounts.clone(), jobs: jobs.clone(), tx: tx.clone(), ctx: ctx.clone() }.run());
-    Self { rt, ctx, tx, rx, host, root, creds, http, device_login_cancel: Arc::new(AtomicBool::new(false)), accounts, jobs }
+    let config = LocalConfig::load(&root);
+    // The provider clients need the runtime (their HTTP connectors spawn on it).
+    let local = config.local_mode.then(|| {
+      let _guard = rt.enter();
+      Arc::new(LocalEngine::new(&root, config, http.clone()))
+    });
+    Self { rt, ctx, tx, rx, host, root, creds, http, device_login_cancel: Arc::new(AtomicBool::new(false)), accounts, jobs, local }
   }
 
   pub fn runtime(&self) -> tokio::runtime::Handle {
@@ -227,6 +238,11 @@ impl Backend {
     &self.root
   }
 
+  /// In local mode, each provider's status line for the settings dialog.
+  pub fn local_status(&self) -> Option<Vec<(&'static str, String, bool)>> {
+    self.local.as_ref().map(|l| l.status())
+  }
+
   /// Events that arrived since the last call.
   pub fn drain(&self) -> Vec<Event> {
     self.rx.try_iter().collect()
@@ -236,6 +252,10 @@ impl Backend {
 
   /// Checks who's signed in (`GET /v1/session`), then fetches their credits.
   pub fn refresh_session(&self) {
+    if self.local.is_some() {
+      let _ = self.tx.send(Event::Session(Some(LocalEngine::user())));
+      return;
+    }
     let api = self.api();
     self.spawn(move |tx| async move {
       if api.creds.is_none() {
@@ -260,6 +280,9 @@ impl Backend {
   }
 
   pub fn refresh_credits(&self) {
+    if self.local.is_some() {
+      return;
+    }
     let api = self.api();
     self.spawn(move |tx| async move { api.send_credits(&tx).await });
   }
@@ -347,6 +370,12 @@ impl Backend {
 
   /// Signs out on the server (best effort) and forgets the session here.
   pub fn logout(&self) {
+    // There's no account to leave in local mode: stay "signed in" so jobs keep polling.
+    if self.local.is_some() {
+      let _ = self.tx.send(Event::Session(Some(LocalEngine::user())));
+      let _ = self.tx.send(Event::Toast { error: false, message: "Local mode has no account to sign out of.".to_owned() });
+      return;
+    }
     let api = self.api();
     let (root, creds) = (self.root.clone(), self.creds.clone());
     if let Ok(mut c) = creds.write() {
@@ -368,6 +397,10 @@ impl Backend {
 
   /// Fetches the OmniGen model listing for `modality`.
   pub fn load_models(&self, modality: Modality) {
+    if let Some(local) = &self.local {
+      let _ = self.tx.send(Event::Models(modality, local.models(modality)));
+      return;
+    }
     let api = self.api();
     let host = api.host.clone();
     self.spawn(move |tx| async move {
@@ -396,6 +429,11 @@ impl Backend {
 
   /// Asks what a request would cost (`POST /v1/omni_gen/cost/{modality}`).
   pub fn estimate_cost(&self, modality: Modality, key: String, fields: Map<String, Value>) {
+    // Local generations bill the user's own cloud accounts: no ArtCraft credits.
+    if self.local.is_some() {
+      let _ = self.tx.send(Event::Cost { key, credits: None });
+      return;
+    }
     let api = self.api();
     self.spawn(move |tx| async move {
       let path = format!("/v1/omni_gen/cost/{}", modality.path());
@@ -412,6 +450,12 @@ impl Backend {
 
   /// Starts a generation (`POST /v1/omni_gen/generate/{modality}`).
   pub fn generate(&self, modality: Modality, mut fields: Map<String, Value>, meta: EnqueueMeta) {
+    if let Some(local) = &self.local {
+      let _guard = self.rt.enter();
+      let token = local.start(modality, &fields, self.tx.clone(), self.ctx.clone());
+      let _ = self.tx.send(Event::Enqueued { modality, job_tokens: vec![token], meta });
+      return;
+    }
     let api = self.api();
     self.spawn(move |tx| async move {
       let Some(creds) = api.creds.as_ref() else {
@@ -441,6 +485,9 @@ impl Backend {
 
   /// Starts an image generation at Midjourney or fal; `image_urls` are the references' links.
   pub fn generate_with_provider(&self, provider: Provider, fields: Map<String, Value>, image_urls: Vec<String>, meta: EnqueueMeta) {
+    if self.local.is_some() {
+      return self.generate(Modality::Image, fields, meta);
+    }
     let (api, accounts, jobs) = (self.api(), self.accounts.clone(), self.jobs.clone());
     self.spawn(move |tx| async move {
       match providers::submit::submit(&api.host, api.creds.as_ref(), &accounts, provider, &fields, image_urls).await {
@@ -462,6 +509,9 @@ impl Backend {
   /// What an image generation costs at `provider`: nothing extra for direct Midjourney (it uses
   /// the user's subscription), fal's price from the server.
   pub fn estimate_provider_cost(&self, provider: Provider, key: String, fields: Map<String, Value>) {
+    if self.local.is_some() {
+      return self.estimate_cost(Modality::Image, key, fields);
+    }
     match provider {
       Provider::Artcraft => self.estimate_cost(Modality::Image, key, fields),
       Provider::Midjourney => {
@@ -518,6 +568,25 @@ impl Backend {
   /// Uploads a reference file from disk; images, MP4 videos and audio.
   pub fn upload_file(&self, ref_id: u64, kind: crate::prompt_box::refs::RefKind, path: PathBuf) {
     use crate::prompt_box::refs::RefKind;
+    if let Some(local) = self.local.clone() {
+      self.spawn(move |tx| async move {
+        let extension = path
+          .extension()
+          .and_then(|e| e.to_str())
+          .unwrap_or(match kind {
+            RefKind::Image => "png",
+            RefKind::Video => "mp4",
+            RefKind::Audio => "mp3",
+          })
+          .to_owned();
+        let result = match tokio::fs::read(&path).await {
+          Ok(bytes) => local.upload(&bytes, &extension),
+          Err(err) => Err(err.to_string()),
+        };
+        let _ = tx.send(Event::Uploaded { ref_id, result });
+      });
+      return;
+    }
     let api = self.api();
     self.spawn(move |tx| async move {
       let token = match kind {
@@ -535,6 +604,12 @@ impl Backend {
 
   /// Uploads a pasted image (PNG bytes).
   pub fn upload_png(&self, ref_id: u64, png: Vec<u8>) {
+    if let Some(local) = self.local.clone() {
+      self.spawn(move |tx| async move {
+        let _ = tx.send(Event::Uploaded { ref_id, result: local.upload(&png, "png") });
+      });
+      return;
+    }
     let api = self.api();
     self.spawn(move |tx| async move {
       let result = upload_image_media_file_from_bytes(UploadImageBytesArgs { api_host: &api.host, maybe_creds: api.creds.as_ref(), image_bytes: png, image_type: ImageType::Png, is_intermediate_system_file: true, maybe_generation_provider: None }).await;
@@ -550,6 +625,10 @@ impl Backend {
 
   /// Polls the session's recent jobs (`GET /v1/jobs/session`).
   pub fn poll_jobs(&self) {
+    if let Some(local) = &self.local {
+      let _ = self.tx.send(Event::Jobs(local.jobs()));
+      return;
+    }
     let api = self.api();
     if api.creds.is_none() {
       return;
@@ -566,6 +645,11 @@ impl Backend {
 
   /// Loads one page of the user's library, filtered to `classes` (e.g. `image`, `video`).
   pub fn load_library(&self, key: String, username: String, classes: &'static str, page: u32) {
+    if let Some(local) = &self.local {
+      let (items, total_pages) = local.library().list(classes, false, page, LIBRARY_PAGE_SIZE);
+      let _ = self.tx.send(Event::LibraryPage { key, page, items, total_pages });
+      return;
+    }
     let api = self.api();
     self.spawn(move |tx| async move {
       let path = format!("/v1/media_files/list/user/{username}?filter_media_classes={classes}&page_size={LIBRARY_PAGE_SIZE}&page_index={page}");
@@ -584,6 +668,10 @@ impl Backend {
 
   /// Lists every file a batch job produced.
   pub fn load_batch(&self, job_token: String, batch_token: String) {
+    if let Some(local) = &self.local {
+      let _ = self.tx.send(Event::Batch { job_token, items: local.library().batch(&batch_token) });
+      return;
+    }
     let api = self.api();
     self.spawn(move |tx| async move {
       match api.get_json::<BatchMedia>(&format!("/v1/media_files/batch_gen_redux/{batch_token}")).await {
@@ -597,6 +685,15 @@ impl Backend {
 
   /// Fetches the prompt record behind a generation (for Recreate and the list view).
   pub fn load_prompt(&self, prompt_token: String) {
+    if let Some(local) = &self.local {
+      match local.library().prompt(&prompt_token) {
+        Some(prompt) => {
+          let _ = self.tx.send(Event::Prompt(prompt));
+        },
+        None => warn!("Prompt {prompt_token} not found locally"),
+      }
+      return;
+    }
     let api = self.api();
     self.spawn(move |tx| async move {
       match api.get_json::<PromptResponse>(&format!("/v1/prompts/{prompt_token}")).await {
@@ -611,6 +708,11 @@ impl Backend {
 
   /// Loads every page of the user's characters.
   pub fn load_characters(&self) {
+    // Characters are an ArtCraft service feature.
+    if self.local.is_some() {
+      let _ = self.tx.send(Event::Characters(Vec::new()));
+      return;
+    }
     let api = self.api();
     if api.creds.is_none() {
       return;
@@ -643,6 +745,10 @@ impl Backend {
 
   /// Starts making a character from an uploaded reference image (`POST /v1/character/create`).
   pub fn create_character(&self, image_token: String, name: String, description: Option<String>) {
+    if self.local.is_some() {
+      let _ = self.tx.send(Event::Toast { error: true, message: "Characters need an ArtCraft account; they aren't available in local mode.".to_owned() });
+      return;
+    }
     let api = self.api();
     self.spawn(move |tx| async move {
       let body = serde_json::json!({ "image_media_token": image_token, "model": CHARACTER_MODEL, "uuid_idempotency_token": uuid::Uuid::new_v4().to_string(), "character_name": name, "character_description": description });
@@ -664,6 +770,10 @@ impl Backend {
 
   /// Renames or re-describes a character (`POST /v1/character/edit`).
   pub fn edit_character(&self, token: String, name: String, description: String) {
+    if self.local.is_some() {
+      let _ = self.tx.send(Event::Toast { error: true, message: "Characters need an ArtCraft account; they aren't available in local mode.".to_owned() });
+      return;
+    }
     let api = self.api();
     self.spawn(move |tx| async move {
       let body = serde_json::json!({ "token": token, "updated_name": name, "updated_description": description });
@@ -681,6 +791,10 @@ impl Backend {
 
   /// `DELETE /v1/character/{token}`.
   pub fn delete_character(&self, token: String, name: String) {
+    if self.local.is_some() {
+      let _ = self.tx.send(Event::Toast { error: true, message: "Characters need an ArtCraft account; they aren't available in local mode.".to_owned() });
+      return;
+    }
     let api = self.api();
     self.spawn(move |tx| async move {
       match api.request_json::<Value>(reqwest::Method::DELETE, &format!("/v1/character/{token}"), None).await {
@@ -696,6 +810,20 @@ impl Backend {
   }
 
   pub fn delete_media(&self, token: String) {
+    if let Some(local) = self.local.clone() {
+      self.spawn(move |tx| async move {
+        match local.library().delete(&token) {
+          Ok(()) => {
+            let _ = tx.send(Event::Deleted(token));
+            let _ = tx.send(Event::Toast { error: false, message: "File deleted.".to_owned() });
+          },
+          Err(err) => {
+            let _ = tx.send(Event::Toast { error: true, message: format!("Couldn't delete: {err}") });
+          },
+        }
+      });
+      return;
+    }
     let api = self.api();
     self.spawn(move |tx| async move {
       match delete_media_file(&api.host, api.creds.as_ref(), &MediaFileToken::new(token.clone())).await {
@@ -715,6 +843,10 @@ impl Backend {
     let http = self.http.clone();
     self.spawn(move |tx| async move {
       let result = async {
+        // Local-mode files are copied straight from the library.
+        if let Some(source) = local::library::file_path(&url) {
+          return tokio::fs::copy(&source, &path).await.map(|_| ()).map_err(|e| e.to_string());
+        }
         let bytes = http.get(&url).send().await.and_then(|r| r.error_for_status()).map_err(|e| e.to_string())?.bytes().await.map_err(|e| e.to_string())?;
         tokio::fs::write(&path, &bytes).await.map_err(|e| e.to_string())
       }

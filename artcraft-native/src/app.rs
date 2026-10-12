@@ -397,9 +397,16 @@ impl ArtcraftApp {
           },
         }
       },
-      AppRequest::Share(token) => {
-        ctx.copy_text(format!("{SHARE_URL_BASE}{token}"));
-        self.toasts.success("Share link copied");
+      AppRequest::Share(token) => match self.find_item(&token).and_then(|i| crate::backend::local::library::file_path(&i.full_url)) {
+        // Local files have no web link: copy where the file is instead.
+        Some(path) => {
+          ctx.copy_text(path.display().to_string());
+          self.toasts.success("File path copied");
+        },
+        None => {
+          ctx.copy_text(format!("{SHARE_URL_BASE}{token}"));
+          self.toasts.success("Share link copied");
+        },
       },
       AppRequest::CopyText(text) => {
         ctx.copy_text(text);
@@ -748,7 +755,8 @@ impl ArtcraftApp {
       let username = self.user.as_ref().map(|u| u.username.clone());
       let accounts = self.backend.accounts();
       let view = AccountsView { midjourney: accounts.midjourney_account(), fal_key_hint: accounts.fal_key_hint() };
-      match settings_dialog(ctx, &mut self.enter_to_generate, username.as_deref(), self.credits, &view, &mut self.fal_key_input, self.backend.data_root()) {
+      let local = self.backend.local_status();
+      match settings_dialog(ctx, &mut self.enter_to_generate, username.as_deref(), self.credits, &view, &mut self.fal_key_input, self.backend.data_root(), local.as_deref()) {
         Some(SettingsAction::Close) => self.settings_open = false,
         Some(SettingsAction::SignOut) => {
           self.settings_open = false;
