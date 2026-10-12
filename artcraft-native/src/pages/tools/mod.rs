@@ -9,6 +9,7 @@ pub mod bg_remove;
 pub mod edit_image;
 pub mod edit_video;
 pub mod frames;
+pub mod stage;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

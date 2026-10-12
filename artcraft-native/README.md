@@ -92,6 +92,22 @@ requested, who decided (Jev with its confidence, the rules, or you), the model a
 ran, Jev's odds for every option against the confidence bar, which models were ruled out and why,
 the cost and how long it took.
 
+**Tools.** In local mode the Studio pages work too. Each one has a stage, an options panel with the
+cost, and a strip of results that also land in the library; any local image or video in the lightbox
+has "Open in" buttons for them.
+
+| Page          | What it does                                                     | Runs on                     |
+|---------------|------------------------------------------------------------------|-----------------------------|
+| Edit Image    | Describe a change (optional painted mask); inpaint, erase, replace, expand | Vertex (Nano Banana); Bedrock (Stability) |
+| BG Remove     | Transparent cut-out                                              | Your Mac (ISNet), or Bedrock |
+| Frame Extract | Marked moments or one frame every N seconds                      | Your Mac (FFmpeg)           |
+| Edit Video    | Trim, join, extend about 7 s                                     | Your Mac (FFmpeg); Vertex (Veo) |
+| 3D Stage      | Block a shot with people, shapes and imported GLB/OBJ, then paint it | Your Mac; Vertex for Generate |
+| Audio         | 30-second instrumental clips                                     | Vertex (Lyria 2)            |
+
+FFmpeg (`brew install ffmpeg`) is needed for video previews, Frame Extract and Edit Video. 3D Object
+and 3D World still say "coming soon": they need a 3D generation provider.
+
 Not in local mode yet: audio models, characters, cost estimates, and Bedrock video (Amazon Nova
 Reel was retired on 2026-09-30; Luma Ray2 needs an S3 bucket). The code is in
 `src/backend/local/`.

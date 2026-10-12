@@ -25,6 +25,7 @@ use crate::pages::tools::bg_remove::BgRemovePage;
 use crate::pages::tools::edit_image::EditImagePage;
 use crate::pages::tools::edit_video::EditVideoPage;
 use crate::pages::tools::frames::FrameExtractPage;
+use crate::pages::tools::stage::StagePage;
 use crate::overlays::lightbox::{Lightbox, LightboxAction, fit_inside};
 use crate::overlays::providers::{AccountAction, AccountsView, LoginEvent, MidjourneyLogin, SetupAction, setup_dialog};
 use crate::pages::common::{self, AppRequest, Env, FeedKey};
@@ -90,6 +91,7 @@ pub struct ArtcraftApp {
   bg_remove: BgRemovePage,
   edit_image: EditImagePage,
   edit_video: EditVideoPage,
+  stage: StagePage,
   page: Page,
   enter_to_generate: bool,
   view_mode: ViewMode,
@@ -156,6 +158,7 @@ impl ArtcraftApp {
       bg_remove: BgRemovePage::default(),
       edit_image: EditImagePage::default(),
       edit_video: EditVideoPage::default(),
+      stage: StagePage::default(),
       page: saved.page,
       enter_to_generate: saved.enter_to_generate,
       view_mode: saved.view_mode,
@@ -248,7 +251,7 @@ impl ArtcraftApp {
         if let Err(message) = &result {
           self.toasts.error(message.clone());
         }
-        if self.frames.session.finish(tool_id, &result) || self.edit_video.session.finish(tool_id, &result) {
+        if self.frames.session.finish(tool_id, &result) || self.edit_video.session.finish(tool_id, &result) || self.stage.session.finish(tool_id, &result) {
         } else if self.bg_remove.session.finish(tool_id, &result) {
           self.bg_remove.after_finish();
         } else if self.edit_image.session.finish(tool_id, &result) {
@@ -720,6 +723,7 @@ impl ArtcraftApp {
             Page::RemoveBackground if env.backend.is_local() => self.bg_remove.ui(ui, &mut env),
             Page::EditImage if env.backend.is_local() => self.edit_image.ui(ui, &mut env),
             Page::VideoEditor if env.backend.is_local() => self.edit_video.ui(ui, &mut env),
+            Page::Stage3d if env.backend.is_local() => self.stage.ui(ui, &mut env),
             page => other::coming_soon(ui, page),
           }
         });

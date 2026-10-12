@@ -142,6 +142,7 @@ impl LocalLibrary {
     format!("{BATCH_PREFIX}{}", uuid::Uuid::new_v4().simple())
   }
 
+  #[cfg_attr(not(test), allow(dead_code))]
   pub fn is_local_token(token: &str) -> bool {
     token.starts_with(TOKEN_PREFIX)
   }

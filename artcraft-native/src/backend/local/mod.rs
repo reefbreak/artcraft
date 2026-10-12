@@ -330,6 +330,10 @@ impl LocalEngine {
         let cost = self.prices.stability_service(route.upstream).unwrap_or(0.0);
         (vec![file], cost, format!("1 image \u{d7} ${cost:.2}"), MediaClass::Image)
       },
+      ToolRequest::SaveImage { image } => {
+        let bytes = read(image)?;
+        (vec![GeneratedFile { bytes, extension: "png", usage: None }], 0.0, "Rendered on your Mac, free".to_owned(), MediaClass::Image)
+      },
       ToolRequest::TrimVideo { video, start, end } => {
         let (video, start, end) = (video.clone(), *start, *end);
         let file = tokio::task::spawn_blocking(move || tools::trim_video(&video, start, end)).await??;

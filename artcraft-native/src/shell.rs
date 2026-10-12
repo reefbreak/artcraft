@@ -102,7 +102,7 @@ impl Page {
   /// Pages the native app has; the rest open a "coming soon" page.
   pub fn is_ready(self) -> bool {
     // The tool pages run on the local engine (this fork's default mode).
-    matches!(self, Page::Home | Page::CreateImage | Page::CreateVideo | Page::CreateAudio | Page::Library | Page::EditImage | Page::VideoEditor | Page::RemoveBackground | Page::FrameExtractor)
+    matches!(self, Page::Home | Page::CreateImage | Page::CreateVideo | Page::CreateAudio | Page::Library | Page::EditImage | Page::VideoEditor | Page::RemoveBackground | Page::FrameExtractor | Page::Stage3d)
   }
 
   /// The same tool in the web app.

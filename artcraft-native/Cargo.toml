@@ -51,6 +51,9 @@ aws-sdk-bedrockruntime = { version = "1.148", features = ["behavior-version-late
 gcp_auth = "0.12.7"
 # Local background removal (ISNet) without native libraries.
 tract-onnx = "0.23"
+# 3D Stage: math and glTF/GLB import.
+glam = { version = "0.30", features = ["serde"] }
+gltf = "1.4"
 
 # Pasting images from the clipboard (egui's own clipboard support is text only).
 arboard = { version = "3", default-features = false, features = ["image-data"] }

@@ -57,6 +57,10 @@ pub enum ToolRequest {
     prompt: String,
     tier: VeoTier,
   },
+  /// Keep an image (a 3D Stage render) in the library as is.
+  SaveImage {
+    image: PathBuf,
+  },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -136,6 +140,7 @@ impl ToolRequest {
       ToolRequest::EditImage { op: EditOp::SearchReplace { .. }, .. } => bedrock("tool_search_replace", "Search and Replace", "stability.stable-image-search-replace-v1:0"),
       ToolRequest::EditImage { op: EditOp::Outpaint { .. }, .. } => bedrock("tool_outpaint", "Outpaint", "stability.stable-outpaint-v1:0"),
       ToolRequest::TrimVideo { .. } => local("tool_trim_video", "Trim", "ffmpeg"),
+      ToolRequest::SaveImage { .. } => local("tool_stage_render", "3D Stage render", "stage"),
       ToolRequest::JoinVideos { .. } => local("tool_join_videos", "Join", "ffmpeg"),
       ToolRequest::ExtendVideo { tier, .. } => ToolRoute {
         id: "tool_extend_video",
