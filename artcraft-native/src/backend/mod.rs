@@ -103,6 +103,11 @@ pub enum Event {
     code: String,
   },
   Credits(u64),
+  /// Local mode: a tool page's run finished, with its results (saved in the library).
+  ToolFinished {
+    tool_id: u64,
+    result: Result<Vec<MediaFile>, String>,
+  },
   /// Local mode: spend on the user's own accounts changed.
   Spend(local::spend::SpendSummary),
   Models(Modality, Result<Vec<ModelInfo>, String>),
@@ -242,6 +247,21 @@ impl Backend {
     &self.root
   }
 
+  /// Runs a tool page's request on the local engine; the page hears back by `tool_id`.
+  pub fn run_tool(&self, tool_id: u64, request: local::tools::ToolRequest) {
+    let Some(local) = &self.local else {
+      let _ = self.tx.send(Event::ToolFinished { tool_id, result: Err("This tool runs in local mode only.".to_owned()) });
+      return;
+    };
+    let _guard = self.rt.enter();
+    local.start_tool(tool_id, request, self.tx.clone(), self.ctx.clone());
+  }
+
+  /// What a tool run would cost at list prices (local mode).
+  pub fn estimate_tool(&self, request: &local::tools::ToolRequest) -> Option<f64> {
+    self.local.as_ref().map(|l| l.estimate_tool(request))
+  }
+
   /// In local mode, how a batch was routed and what it cost (`None` for ArtCraft generations).
   pub fn generation_record(&self, batch_token: &str) -> Option<local::library::GenerationRecord> {
     self.local.as_ref().and_then(|l| l.generation(batch_token))
@@ -250,6 +270,11 @@ impl Backend {
   /// In local mode, where the spend ledger is saved.
   pub fn spend_path(&self) -> Option<PathBuf> {
     self.local.as_ref().map(|l| l.spend_path().to_path_buf())
+  }
+
+  /// Whether the app runs on the user's own accounts (local mode).
+  pub fn is_local(&self) -> bool {
+    self.local.is_some()
   }
 
   /// In local mode, each provider's status line for the settings dialog.

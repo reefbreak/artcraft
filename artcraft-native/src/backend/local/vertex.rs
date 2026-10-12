@@ -48,6 +48,8 @@ pub struct VeoRequest<'a> {
   pub duration_seconds: Option<u16>,
   pub sample_count: u16,
   pub generate_audio: Option<bool>,
+  /// A clip to extend (MP4, 1–30 s, 24 fps, 720p or 1080p): Veo continues it by about 7 s.
+  pub extend: Option<&'a [u8]>,
 }
 
 #[derive(Clone)]
@@ -193,6 +195,9 @@ fn veo_body(request: &VeoRequest<'_>) -> Value {
   if let Some(image) = request.end_frame {
     instance.insert("lastFrame".into(), frame(image));
   }
+  if let Some(video) = request.extend {
+    instance.insert("video".into(), json!({ "bytesBase64Encoded": BASE64.encode(video), "mimeType": "video/mp4" }));
+  }
   let mut parameters = serde_json::Map::new();
   parameters.insert("sampleCount".into(), json!(request.sample_count.max(1)));
   if let Some(ratio) = request.aspect_ratio {
@@ -305,7 +310,7 @@ mod tests {
   #[test]
   fn veo_requests_carry_frames_and_settings() {
     let frame = RefImage { mime_type: "image/png".into(), bytes: vec![1, 2, 3] };
-    let body = veo_body(&VeoRequest { model: "veo-3.1-fast-generate-001", prompt: "waves", start_frame: Some(&frame), end_frame: None, aspect_ratio: Some("9:16"), resolution: Some("1080p"), duration_seconds: Some(6), sample_count: 2, generate_audio: Some(false) });
+    let body = veo_body(&VeoRequest { model: "veo-3.1-fast-generate-001", prompt: "waves", start_frame: Some(&frame), end_frame: None, aspect_ratio: Some("9:16"), resolution: Some("1080p"), duration_seconds: Some(6), sample_count: 2, generate_audio: Some(false), extend: None });
     assert_eq!(body["instances"][0]["image"], json!({ "bytesBase64Encoded": "AQID", "mimeType": "image/png" }));
     assert!(body["instances"][0].get("lastFrame").is_none());
     assert_eq!(body["parameters"], json!({ "sampleCount": 2, "aspectRatio": "9:16", "resolution": "1080p", "durationSeconds": 6, "generateAudio": false }));

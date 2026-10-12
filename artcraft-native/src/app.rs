@@ -21,6 +21,10 @@ use crate::overlays::account::{LoginAction, LoginDialog, SettingsAction, setting
 use crate::overlays::characters::{CharactersAction, CharactersModal};
 use crate::overlays::library_picker::{LibraryPicker, PickerAction};
 use crate::backend::local::spend::SpendSummary;
+use crate::pages::tools::bg_remove::BgRemovePage;
+use crate::pages::tools::edit_image::EditImagePage;
+use crate::pages::tools::edit_video::EditVideoPage;
+use crate::pages::tools::frames::FrameExtractPage;
 use crate::overlays::lightbox::{Lightbox, LightboxAction, fit_inside};
 use crate::overlays::providers::{AccountAction, AccountsView, LoginEvent, MidjourneyLogin, SetupAction, setup_dialog};
 use crate::pages::common::{self, AppRequest, Env, FeedKey};
@@ -81,6 +85,11 @@ pub struct ArtcraftApp {
   credits: Option<u64>,
   /// Local mode: spend on the user's own accounts.
   spend: Option<SpendSummary>,
+  /// The tool pages (local mode).
+  frames: FrameExtractPage,
+  bg_remove: BgRemovePage,
+  edit_image: EditImagePage,
+  edit_video: EditVideoPage,
   page: Page,
   enter_to_generate: bool,
   view_mode: ViewMode,
@@ -135,8 +144,51 @@ impl ArtcraftApp {
       backend.load_models(modality);
     }
     backend.refresh_session();
-    let mut app =
-      Self { cache, player, toasts: Toasts::default(), catalog: Catalog::default(), user: None, credits: None, spend: None, page: saved.page, enter_to_generate: saved.enter_to_generate, view_mode: saved.view_mode, autoplay: saved.autoplay, sidebar_open: saved.sidebar_open, image: CreateImagePage::new(saved.image), video: CreateVideoPage::new(saved.video), audio: CreateAudioPage::new(saved.audio), library: FeedStore::default(), ratios: RatioCache::default(), prompts: HashMap::new(), prompt_records: HashMap::new(), requested_prompts: HashSet::new(), pending_recreate: None, batch_kinds: HashMap::new(), lightbox: None, picker: None, login: None, characters_modal: None, characters: Vec::new(), pending_characters: Vec::new(), settings_open: false, provider_setup: None, midjourney_login: None, fal_key_input: String::new(), preview: None, requests: Vec::new(), screenshot: ScreenshotRequest::from_env(), next_poll: 0.0, next_credits: CREDITS_INTERVAL, models_retry_at: None, backend };
+    let mut app = Self {
+      cache,
+      player,
+      toasts: Toasts::default(),
+      catalog: Catalog::default(),
+      user: None,
+      credits: None,
+      spend: None,
+      frames: FrameExtractPage::default(),
+      bg_remove: BgRemovePage::default(),
+      edit_image: EditImagePage::default(),
+      edit_video: EditVideoPage::default(),
+      page: saved.page,
+      enter_to_generate: saved.enter_to_generate,
+      view_mode: saved.view_mode,
+      autoplay: saved.autoplay,
+      sidebar_open: saved.sidebar_open,
+      image: CreateImagePage::new(saved.image),
+      video: CreateVideoPage::new(saved.video),
+      audio: CreateAudioPage::new(saved.audio),
+      library: FeedStore::default(),
+      ratios: RatioCache::default(),
+      prompts: HashMap::new(),
+      prompt_records: HashMap::new(),
+      requested_prompts: HashSet::new(),
+      pending_recreate: None,
+      batch_kinds: HashMap::new(),
+      lightbox: None,
+      picker: None,
+      login: None,
+      characters_modal: None,
+      characters: Vec::new(),
+      pending_characters: Vec::new(),
+      settings_open: false,
+      provider_setup: None,
+      midjourney_login: None,
+      fal_key_input: String::new(),
+      preview: None,
+      requests: Vec::new(),
+      screenshot: ScreenshotRequest::from_env(),
+      next_poll: 0.0,
+      next_credits: CREDITS_INTERVAL,
+      models_retry_at: None,
+      backend,
+    };
     app.restore_provider_jobs();
     // Diagnostics: `ARTCRAFT_OPEN=settings` or `midjourney-login` opens that dialog at launch.
     match std::env::var("ARTCRAFT_OPEN").as_deref() {
@@ -192,6 +244,22 @@ impl ArtcraftApp {
       },
       Event::Credits(credits) => self.credits = Some(credits),
       Event::Spend(summary) => self.spend = Some(summary),
+      Event::ToolFinished { tool_id, result } => {
+        if let Err(message) = &result {
+          self.toasts.error(message.clone());
+        }
+        if self.frames.session.finish(tool_id, &result) || self.edit_video.session.finish(tool_id, &result) {
+        } else if self.bg_remove.session.finish(tool_id, &result) {
+          self.bg_remove.after_finish();
+        } else if self.edit_image.session.finish(tool_id, &result) {
+          self.edit_image.after_finish();
+        }
+        if let Ok(files) = &result {
+          self.toasts.success(format!("{} saved to your library", if files.len() == 1 { "Result".to_owned() } else { format!("{} results", files.len()) }));
+          // The library feed shows them next time it loads.
+          self.library.reset();
+        }
+      },
       Event::Models(modality, Ok(models)) => match modality {
         Modality::Image => self.catalog.set_image(models),
         Modality::Video => self.catalog.set_video(models),
@@ -648,6 +716,10 @@ impl ArtcraftApp {
             Page::CreateVideo => self.video.ui(ui, &mut env),
             Page::CreateAudio => self.audio.ui(ui, &mut env),
             Page::Library => other::library(ui, &mut env, &mut self.library),
+            Page::FrameExtractor if env.backend.is_local() => self.frames.ui(ui, &mut env),
+            Page::RemoveBackground if env.backend.is_local() => self.bg_remove.ui(ui, &mut env),
+            Page::EditImage if env.backend.is_local() => self.edit_image.ui(ui, &mut env),
+            Page::VideoEditor if env.backend.is_local() => self.edit_video.ui(ui, &mut env),
             page => other::coming_soon(ui, page),
           }
         });
@@ -866,6 +938,19 @@ impl ArtcraftApp {
         self.lightbox = None;
       },
       LightboxAction::CopyPrompt(text) => self.handle_request(ctx, AppRequest::CopyText(text)),
+      LightboxAction::OpenIn(page) => match crate::backend::local::library::file_path(&item.full_url) {
+        Some(path) => {
+          match page {
+            Page::EditImage => self.edit_image.open(path),
+            Page::RemoveBackground => self.bg_remove.open(path),
+            Page::FrameExtractor => self.frames.open(path),
+            Page::VideoEditor => self.edit_video.open(path),
+            _ => {},
+          }
+          self.navigate(page);
+        },
+        None => self.toasts.error("Only files in your local library can be opened in the tools."),
+      },
       LightboxAction::Play(url) => {
         if let Err(err) = open::that(&url) {
           self.toasts.error(format!("Couldn't open the video: {err}"));

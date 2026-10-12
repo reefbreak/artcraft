@@ -90,13 +90,19 @@ impl Page {
       "create-video" | "video" => Page::CreateVideo,
       "create-audio" | "audio" => Page::CreateAudio,
       "library" => Page::Library,
+      "edit-image" => Page::EditImage,
+      "edit-video" | "video-editor" => Page::VideoEditor,
+      "remove-background" | "bg-remove" => Page::RemoveBackground,
+      "frame-extractor" | "frames" => Page::FrameExtractor,
+      "3d-stage" | "stage" => Page::Stage3d,
       _ => return None,
     })
   }
 
   /// Pages the native app has; the rest open a "coming soon" page.
   pub fn is_ready(self) -> bool {
-    matches!(self, Page::Home | Page::CreateImage | Page::CreateVideo | Page::CreateAudio | Page::Library)
+    // The tool pages run on the local engine (this fork's default mode).
+    matches!(self, Page::Home | Page::CreateImage | Page::CreateVideo | Page::CreateAudio | Page::Library | Page::EditImage | Page::VideoEditor | Page::RemoveBackground | Page::FrameExtractor)
   }
 
   /// The same tool in the web app.

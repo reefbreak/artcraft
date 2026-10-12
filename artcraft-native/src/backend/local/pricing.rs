@@ -104,6 +104,16 @@ impl PriceBook {
     Some(self.get(model, base))
   }
 
+  /// One of Stability's image services on Bedrock, per call (key: the model id).
+  pub fn stability_service(&self, model: &str) -> Option<f64> {
+    let base = match model {
+      "stability.stable-image-inpaint-v1:0" | "stability.stable-image-erase-object-v1:0" | "stability.stable-image-remove-background-v1:0" | "stability.stable-image-search-replace-v1:0" | "stability.stable-image-search-recolor-v1:0" => 0.07,
+      "stability.stable-outpaint-v1:0" => 0.06,
+      _ => return None,
+    };
+    Some(self.get(model, base))
+  }
+
   /// A Jev routing call: input tokens only (output is free).
   pub fn jev_call(&self, input_tokens: u64) -> f64 {
     input_tokens as f64 * self.get("jev.input", 0.042) / MILLION

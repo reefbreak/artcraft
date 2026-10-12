@@ -10,6 +10,7 @@ use crate::backend::video::{self, VideoPlayer};
 use crate::backend::wire::Prompt;
 use crate::feed::grid::ModelNames;
 use crate::feed::types::{FeedItem, MediaKind};
+use crate::shell::Page;
 use crate::theme;
 use crate::ui::icons::{self, Icon};
 use crate::ui::{creator_icons, waveform, widgets};
@@ -39,6 +40,8 @@ pub enum LightboxAction {
   Delete,
   CopyPrompt(String),
   Play(String),
+  /// Open the item in a tool page (local mode).
+  OpenIn(Page),
 }
 
 impl Lightbox {
@@ -280,6 +283,27 @@ impl Lightbox {
         self.confirm_delete = true;
       }
     });
+    // Local files can go straight into the tool pages.
+    if item.full_url.starts_with("file://") {
+      let tools: &[(Page, &str)] = match item.kind {
+        MediaKind::Image => &[(Page::EditImage, "Edit image"), (Page::RemoveBackground, "Remove background")],
+        MediaKind::Video => &[(Page::VideoEditor, "Edit video"), (Page::FrameExtractor, "Extract frames")],
+        MediaKind::Audio => &[],
+      };
+      if !tools.is_empty() {
+        ui.add_space(12.0);
+        widgets::hud(ui, "Open in", theme::FAINT);
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+          ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+          for (page, label) in tools {
+            if widgets::button(ui, None, label, widgets::Kind::Secondary, w, theme::CONTROL_H).clicked() {
+              actions.push(LightboxAction::OpenIn(*page));
+            }
+          }
+        });
+      }
+    }
   }
 
   fn confirm(&mut self, ctx: &egui::Context, actions: &mut Vec<LightboxAction>) {

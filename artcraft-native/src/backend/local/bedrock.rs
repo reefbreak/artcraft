@@ -48,6 +48,16 @@ impl BedrockClient {
     first_image(&response)
   }
 
+  /// One of Stability's image services (inpaint, erase, remove background, search and replace,
+  /// outpaint). They're served only through the US cross-region profile, hence the `us.` prefix.
+  pub async fn image_service(&self, model: &str, body: Value) -> anyhow::Result<GeneratedFile> {
+    let client = self.client().await;
+    let model_id = if model.starts_with("us.") { model.to_owned() } else { format!("us.{model}") };
+    let output = client.invoke_model().model_id(model_id).content_type("application/json").accept("application/json").body(Blob::new(serde_json::to_vec(&body)?)).send().await.map_err(|err| anyhow::anyhow!("Bedrock error: {}", aws_sdk_bedrockruntime::error::DisplayErrorContext(err)))?;
+    let response: Value = serde_json::from_slice(output.body.as_ref())?;
+    first_image(&response)
+  }
+
   async fn client(&self) -> &Client {
     self
       .client

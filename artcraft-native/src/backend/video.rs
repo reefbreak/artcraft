@@ -86,6 +86,16 @@ impl VideoPlayer {
     Self { url: url.to_owned(), source, probe: Some(rx), info: None, stream: None, texture: None, position: 0.0, muted: false, error: None, output: None }
   }
 
+  /// The media time of the frame on screen, in seconds.
+  pub fn position(&self) -> f64 {
+    self.position
+  }
+
+  /// The clip's length, once probed.
+  pub fn duration(&self) -> Option<f64> {
+    self.info.map(|i| i.duration)
+  }
+
   pub fn url(&self) -> &str {
     &self.url
   }
@@ -332,13 +342,18 @@ impl Source for PcmStream {
   }
 }
 
-/// Reads the clip's size, rate and length. A small probe keeps this ~2 s on CDN files instead of
-/// ~14 s (ffprobe otherwise scans much of the file over HTTP).
 /// The input FFmpeg should open for `url`.
 fn ffmpeg_source(url: &str) -> String {
   crate::backend::local::library::file_path(url).map_or_else(|| url.to_owned(), |path| path.to_string_lossy().into_owned())
 }
 
+/// A local clip's width, height, frame rate and length in seconds (tools use it on library files).
+pub fn probe_file(path: &std::path::Path) -> Result<(u32, u32, f64, f64), String> {
+  probe(&path.to_string_lossy()).map(|i| (i.width, i.height, i.fps, i.duration))
+}
+
+/// Reads the clip's size, rate and length. A small probe keeps this ~2 s on CDN files instead of
+/// ~14 s (ffprobe otherwise scans much of the file over HTTP).
 fn probe(url: &str) -> Result<VideoInfo, String> {
   #[derive(serde::Deserialize, Default)]
   #[serde(default)]

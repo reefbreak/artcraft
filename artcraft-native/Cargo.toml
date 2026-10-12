@@ -34,7 +34,7 @@ env_logger.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 log.workspace = true
 open = "5"
-reqwest = { workspace = true, features = ["multipart"] }
+reqwest = { workspace = true, features = ["multipart", "stream"] }
 resvg = "0.45"
 rfd = "0.16"
 rodio = { version = "0.20", default-features = false, features = ["symphonia-all"] }
@@ -49,6 +49,8 @@ uuid = { workspace = true, features = ["v4"] }
 aws-config = { version = "1.12", features = ["behavior-version-latest"] }
 aws-sdk-bedrockruntime = { version = "1.148", features = ["behavior-version-latest"] }
 gcp_auth = "0.12.7"
+# Local background removal (ISNet) without native libraries.
+tract-onnx = "0.23"
 
 # Pasting images from the clipboard (egui's own clipboard support is text only).
 arboard = { version = "3", default-features = false, features = ["image-data"] }

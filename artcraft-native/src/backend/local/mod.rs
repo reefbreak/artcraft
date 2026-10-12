@@ -6,6 +6,7 @@
 //! unchanged.
 
 pub mod bedrock;
+pub mod bgremove;
 pub mod catalog;
 pub mod config;
 pub mod estimate;
@@ -14,6 +15,7 @@ pub mod library;
 pub mod pricing;
 pub mod router;
 pub mod spend;
+pub mod tools;
 pub mod vertex;
 
 use std::path::Path;
@@ -29,6 +31,7 @@ use crate::backend::wire::{ContextImage, Job, JobRequest, JobResult, JobStatus, 
 use crate::backend::{Event, Modality, UploadedMedia};
 use crate::models::ModelInfo;
 use bedrock::{BedrockClient, StabilityRequest};
+use bgremove::BackgroundRemover;
 use catalog::Route;
 use config::LocalConfig;
 use estimate::{CostEstimate, VEO_HD_SECONDS};
@@ -37,6 +40,7 @@ use library::{GenerationRecord, JevRecord, LocalLibrary, MediaClass, NewFile, Or
 use pricing::{GeminiUsage, PriceBook};
 use router::{Decision, Request};
 use spend::{Account, SpendEntry, SpendLedger, SpendSummary};
+use tools::{BackgroundEngine, EditOp, ToolRequest};
 use vertex::{GeminiImageRequest, VeoRequest, VertexClient};
 
 pub const LOCAL_USERNAME: &str = "local";
@@ -80,6 +84,7 @@ pub struct LocalEngine {
   jobs: Arc<Mutex<Vec<Job>>>,
   prices: PriceBook,
   spend: SpendLedger,
+  remover: BackgroundRemover,
 }
 
 impl LocalEngine {
@@ -89,7 +94,8 @@ impl LocalEngine {
     info!("Local mode: Vertex {}, Veo {}, Bedrock {}, Jev {}", config.vertex_enabled(), config.veo_enabled(), config.bedrock_enabled(), jev.is_some());
     let library = LocalLibrary::load(data_root);
     let spend = SpendLedger::load(library.dir());
-    Self { vertex: VertexClient::new(http, config.clone()), bedrock: BedrockClient::new(config.clone()), jev, jobs: Arc::new(Mutex::new(Vec::new())), prices: PriceBook::new(config.prices.clone()), spend, library, config }
+    let remover = BackgroundRemover::new(data_root, http.clone());
+    Self { remover, vertex: VertexClient::new(http, config.clone()), bedrock: BedrockClient::new(config.clone()), jev, jobs: Arc::new(Mutex::new(Vec::new())), prices: PriceBook::new(config.prices.clone()), spend, library, config }
   }
 
   /// Who the app shows as signed in.
@@ -165,6 +171,24 @@ impl LocalEngine {
     token
   }
 
+  /// Runs a tool page's request in the background; the page hears back by `tool_id`.
+  pub fn start_tool(self: &Arc<Self>, tool_id: u64, request: ToolRequest, tx: Sender<Event>, ctx: egui::Context) {
+    let engine = self.clone();
+    tokio::spawn(async move {
+      let result = engine.run_tool(&request, &tx).await.map_err(|err| {
+        warn!("Tool {:?} failed: {err:#}", request.route().name);
+        format!("{err:#}")
+      });
+      let _ = tx.send(Event::ToolFinished { tool_id, result });
+      ctx.request_repaint();
+    });
+  }
+
+  /// What a tool run would cost at list prices.
+  pub fn estimate_tool(&self, request: &ToolRequest) -> f64 {
+    request.estimate(&self.prices)
+  }
+
   /// Every job still worth listing.
   pub fn jobs(&self) -> Vec<Job> {
     let now = chrono::Utc::now().timestamp();
@@ -236,7 +260,7 @@ impl LocalEngine {
         let resolution = resolution.and_then(catalog::video_resolution);
         // Veo makes 1080p and 4K only as 8-second clips.
         let duration = estimate::veo_duration(model, request, resolution);
-        let files = self.vertex.generate_video(VeoRequest { model: upstream, prompt: &request.prompt, start_frame: start.as_ref(), end_frame: end.as_ref(), aspect_ratio: aspect, resolution, duration_seconds: duration, sample_count: request.batch_count, generate_audio: request.generate_audio }).await?;
+        let files = self.vertex.generate_video(VeoRequest { model: upstream, prompt: &request.prompt, start_frame: start.as_ref(), end_frame: end.as_ref(), aspect_ratio: aspect, resolution, duration_seconds: duration, sample_count: request.batch_count, generate_audio: request.generate_audio, extend: None }).await?;
         // Veo 3.x makes sound unless told not to.
         let audio = request.generate_audio.unwrap_or(true);
         let seconds = f64::from(duration.unwrap_or(VEO_HD_SECONDS)) * files.len() as f64;
@@ -254,6 +278,86 @@ impl LocalEngine {
       warn!("Couldn't save the routing record: {err}");
     }
     Ok(saved)
+  }
+
+  async fn run_tool(&self, request: &ToolRequest, tx: &Sender<Event>) -> anyhow::Result<Vec<MediaFile>> {
+    let started = Instant::now();
+    let route = request.route();
+    let batch = LocalLibrary::new_batch_token();
+    let read = |path: &Path| std::fs::read(path).map_err(|e| anyhow::anyhow!("Couldn't read {}: {e}", path.display()));
+    let (files, cost, basis, class): (Vec<GeneratedFile>, f64, String, MediaClass) = match request {
+      ToolRequest::ExtractFrames { video, times } => {
+        let (video, times) = (video.clone(), times.clone());
+        let files = tokio::task::spawn_blocking(move || tools::extract_frames(&video, &times)).await??;
+        let basis = format!("{} frame{} \u{b7} on your Mac, free", files.len(), plural(files.len()));
+        (files, 0.0, basis, MediaClass::Image)
+      },
+      ToolRequest::RemoveBackground { image, engine: BackgroundEngine::Local } => {
+        if self.remover.needs_download() {
+          let _ = tx.send(Event::Toast { error: false, message: "Downloading the background-removal model (179 MB, once)\u{2026}".to_owned() });
+        }
+        let png = self.remover.remove(&read(image)?).await?;
+        (vec![GeneratedFile { bytes: png, extension: "png", usage: None }], 0.0, "ISNet on your Mac, free".to_owned(), MediaClass::Image)
+      },
+      ToolRequest::RemoveBackground { image, engine: BackgroundEngine::Bedrock } => {
+        let body = serde_json::json!({ "image": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, read(image)?), "output_format": "png" });
+        let file = self.bedrock.image_service(route.upstream, body).await?;
+        let cost = self.prices.stability_service(route.upstream).unwrap_or(0.0);
+        (vec![file], cost, format!("1 image \u{d7} ${cost:.2}"), MediaClass::Image)
+      },
+      ToolRequest::EditImage { image, mask, op: EditOp::Instruct { prompt, image_size, .. } } => {
+        let source = self.load_path(image)?;
+        let (images, prompt) = tools::instruct_parts(source, mask.as_deref(), prompt);
+        let size = image_size.as_deref().and_then(catalog::image_size);
+        let file = self.vertex.generate_image(tools::gemini_edit(route.upstream, &images, &prompt, size)).await?;
+        let cost = self.prices.gemini_call(route.upstream, file.usage, size).unwrap_or(0.0);
+        let basis = file.usage.and_then(|u| u.image_tokens).map_or_else(|| "1 image at list price".to_owned(), |t| format!("1 image \u{b7} {} image tokens", group(t)));
+        (vec![file], cost, basis, MediaClass::Image)
+      },
+      ToolRequest::EditImage { image, mask, op } => {
+        let file = self.bedrock.image_service(route.upstream, tools::stability_body(op, &read(image)?, mask.as_deref())).await?;
+        let cost = self.prices.stability_service(route.upstream).unwrap_or(0.0);
+        (vec![file], cost, format!("1 image \u{d7} ${cost:.2}"), MediaClass::Image)
+      },
+      ToolRequest::TrimVideo { video, start, end } => {
+        let (video, start, end) = (video.clone(), *start, *end);
+        let file = tokio::task::spawn_blocking(move || tools::trim_video(&video, start, end)).await??;
+        (vec![file], 0.0, format!("{:.1}s clip \u{b7} on your Mac, free", end - start), MediaClass::Video)
+      },
+      ToolRequest::JoinVideos { videos } => {
+        let videos = videos.clone();
+        let count = videos.len();
+        let file = tokio::task::spawn_blocking(move || tools::join_videos(&videos)).await??;
+        (vec![file], 0.0, format!("{count} clips joined \u{b7} on your Mac, free"), MediaClass::Video)
+      },
+      ToolRequest::ExtendVideo { video, prompt, tier } => {
+        let video = video.clone();
+        let clip = tokio::task::spawn_blocking(move || tools::prepare_for_extension(&video)).await??;
+        let files = self.vertex.generate_video(tools::veo_extend(tier.model(), prompt, &clip)).await?;
+        let rate = self.prices.veo_per_second(tier.model(), true, "720p").unwrap_or(0.0);
+        let cost = rate * tools::EXTEND_SECONDS * files.len() as f64;
+        (files, cost, format!("{:.0}s added at ${rate:.2}/s", tools::EXTEND_SECONDS), MediaClass::Video)
+      },
+    };
+    if let Some(account) = route.account {
+      self.charge(tx, vec![(account, cost, route.upstream.to_owned())], &batch);
+    }
+    let saved: Vec<MediaFile> = tokio::task::block_in_place(|| files.iter().map(|f| self.library.add(NewFile { bytes: &f.bytes, extension: f.extension, class, origin: Origin::Generated, maybe_batch_token: Some(&batch), maybe_prompt_token: None, maybe_model_id: Some(route.id) })).collect::<anyhow::Result<_>>())?;
+    let record = GenerationRecord { batch_token: batch.clone(), requested_model: route.id.to_owned(), chosen_model: route.id.to_owned(), chosen_name: route.name.to_owned(), provider: route.provider.to_owned(), upstream_model: route.upstream.to_owned(), decided_by: "user".to_owned(), maybe_jev: None, candidates: vec![route.name.to_owned()], ruled_out: Vec::new(), cost_usd: cost, routing_cost_usd: 0.0, cost_basis: basis, outputs: saved.len() as u32, seconds: started.elapsed().as_secs_f32() };
+    if let Err(err) = self.library.add_generation(record) {
+      warn!("Couldn't save the tool record: {err}");
+    }
+    Ok(saved)
+  }
+
+  fn load_path(&self, path: &Path) -> anyhow::Result<RefImage> {
+    let bytes = std::fs::read(path).map_err(|e| anyhow::anyhow!("Couldn't read {}: {e}", path.display()))?;
+    let mime_type = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+      Some("jpg" | "jpeg") => "image/jpeg",
+      Some("webp") => "image/webp",
+      _ => "image/png",
+    };
+    Ok(RefImage { mime_type: mime_type.to_owned(), bytes })
   }
 
   /// Records charges against the user's accounts and tells the top bar.
