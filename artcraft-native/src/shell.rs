@@ -3,6 +3,7 @@
 
 use egui::{Align2, Color32, FontId, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
 
+use crate::backend::local::spend::{Account as SpendAccount, SpendSummary};
 use crate::feed::grid::ViewMode;
 use crate::theme;
 use crate::ui::icons::{self, Icon};
@@ -123,6 +124,9 @@ pub struct Account<'a> {
   pub username: Option<&'a str>,
   pub display_name: Option<&'a str>,
   pub credits: Option<u64>,
+  /// Local mode: spend on the user's own cloud accounts.
+  pub spend: Option<&'a SpendSummary>,
+  pub spend_path: Option<&'a std::path::Path>,
 }
 
 /// What the user did in the frame.
@@ -174,6 +178,9 @@ pub fn titlebar(ui: &mut Ui, account: &Account<'_>, mark: &egui::TextureHandle) 
       Some(_) => {
         if let Some(a) = account_menu(ui, account) {
           action = Some(a);
+        }
+        if let Some(spend) = account.spend {
+          spend_meter(ui, spend, account.spend_path);
         }
         if let Some(credits) = account.credits {
           if credits_pill(ui, credits).clicked() {
@@ -341,6 +348,67 @@ fn credits_pill(ui: &mut Ui, credits: u64) -> egui::Response {
   icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(14.0, 14.0)), Icon::Coins, theme::INK);
   ui.painter().galley(pos2(rect.left() + 28.0, rect.center().y - galley.size().y / 2.0), galley, theme::INK);
   resp.on_hover_text("Your credit balance \u{b7} Buy credits").on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Local mode's spend meter: today's total beside the profile icon; click for the breakdown by
+/// account, today and this month.
+fn spend_meter(ui: &mut Ui, spend: &SpendSummary, ledger: Option<&std::path::Path>) {
+  let text = format!("{} today", usd(spend.today.total()));
+  let galley = ui.painter().layout_no_wrap(text, FontId::new(13.0, theme::semibold()), theme::INK);
+  let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 40.0, 30.0), Sense::click());
+  ui.painter().rect(rect, theme::RADIUS, if resp.hovered() { theme::WASH_HOVER } else { theme::WASH }, theme::hairline(), egui::StrokeKind::Inside);
+  icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(14.0, 14.0)), Icon::Coins, theme::INK);
+  ui.painter().galley(pos2(rect.left() + 28.0, rect.center().y - galley.size().y / 2.0), galley, theme::INK);
+  let resp = resp.on_hover_text("Spend on your accounts \u{b7} click for details").on_hover_cursor(egui::CursorIcon::PointingHand);
+  egui::Popup::menu(&resp).frame(widgets::popover_frame()).align(egui::RectAlign::BOTTOM_END).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+    ui.set_min_width(300.0);
+    widgets::hud(ui, "Spend on your accounts", theme::MUTED);
+    ui.add_space(6.0);
+    egui::Grid::new("spend-grid").num_columns(3).spacing(vec2(18.0, 6.0)).show(ui, |ui| {
+      let head = |ui: &mut Ui, t: &str| ui.label(egui::RichText::new(t).size(11.0).family(theme::mono()).color(theme::FAINT));
+      head(ui, "");
+      head(ui, "TODAY");
+      head(ui, "THIS MONTH");
+      ui.end_row();
+      for account in SpendAccount::ALL {
+        ui.label(egui::RichText::new(account.label()).size(13.0));
+        ui.label(egui::RichText::new(usd(spend.today.of(account))).size(13.0).family(theme::mono()));
+        ui.label(egui::RichText::new(usd(spend.month.of(account))).size(13.0).family(theme::mono()));
+        ui.end_row();
+      }
+      ui.label(egui::RichText::new("Total").size(13.0).family(theme::semibold()));
+      ui.label(egui::RichText::new(usd(spend.today.total())).size(13.0).family(theme::mono_bold()));
+      ui.label(egui::RichText::new(usd(spend.month.total())).size(13.0).family(theme::mono_bold()));
+      ui.end_row();
+    });
+    ui.add_space(8.0);
+    let mut facts = vec![format!("{} generation{} today", spend.generations_today, if spend.generations_today == 1 { "" } else { "s" }), format!("{} all time", usd(spend.all_time.total()))];
+    if let Some((item, cost)) = &spend.last {
+      facts.push(format!("last: {item} {}", usd(*cost)));
+    }
+    ui.label(egui::RichText::new(facts.join(" \u{b7} ")).size(12.0).color(theme::MUTED));
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("Metered live by this app at list prices. Your cloud bills also include anything else on those accounts and update hours later.").size(11.5).color(theme::FAINT));
+    if let Some(path) = ledger {
+      ui.add_space(6.0);
+      if ui.add(egui::Button::new(egui::RichText::new("Open spend log").size(12.0).color(theme::ACCENT_INK)).frame(false)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        if let Err(err) = open::that(path) {
+          log::warn!("Couldn't open {}: {err}", path.display());
+        }
+      }
+    }
+  });
+}
+
+/// Dollars for the meter: cents, or "<$0.01" for a sliver (a Jev call is a few millionths).
+pub fn usd(amount: f64) -> String {
+  if amount <= 0.0 {
+    "$0.00".to_owned()
+  } else if amount < 0.01 {
+    "<$0.01".to_owned()
+  } else {
+    format!("${amount:.2}")
+  }
 }
 
 fn account_menu(ui: &mut Ui, account: &Account<'_>) -> Option<ShellAction> {

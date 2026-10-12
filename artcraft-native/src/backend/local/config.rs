@@ -5,6 +5,7 @@
 //! Vertex express-mode key; GCP and AWS credentials come from their usual chains (`gcloud auth
 //! application-default login`, `~/.aws`, SSO profiles, instance roles).
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -51,11 +52,16 @@ pub struct LocalConfig {
   pub jev_api_key: Option<String>,
   pub jev_model: String,
   pub jev_min_confidence: f32,
+
+  // --- Spend meter ---
+  /// Price overrides in USD, keyed as documented on `PriceBook` (e.g. `stability.sd3-5-large-v1:0`).
+  #[serde(skip_serializing_if = "HashMap::is_empty")]
+  pub prices: HashMap<String, f64>,
 }
 
 impl Default for LocalConfig {
   fn default() -> Self {
-    Self { local_mode: true, gcp_project: None, gcp_location: DEFAULT_GCP_LOCATION.to_owned(), gcp_video_location: DEFAULT_GCP_VIDEO_LOCATION.to_owned(), gcp_api_key: None, vertex_base_url: None, bedrock_enabled: None, aws_region: DEFAULT_AWS_REGION.to_owned(), aws_profile: None, jev_api_key: None, jev_model: DEFAULT_JEV_MODEL.to_owned(), jev_min_confidence: DEFAULT_JEV_MIN_CONFIDENCE }
+    Self { local_mode: true, gcp_project: None, gcp_location: DEFAULT_GCP_LOCATION.to_owned(), gcp_video_location: DEFAULT_GCP_VIDEO_LOCATION.to_owned(), gcp_api_key: None, vertex_base_url: None, bedrock_enabled: None, aws_region: DEFAULT_AWS_REGION.to_owned(), aws_profile: None, jev_api_key: None, jev_model: DEFAULT_JEV_MODEL.to_owned(), jev_min_confidence: DEFAULT_JEV_MIN_CONFIDENCE, prices: HashMap::new() }
   }
 }
 

@@ -21,6 +21,10 @@ pub struct JevChoice {
   pub choice: String,
   pub probability: f32,
   pub confidence: f32,
+  /// Every option's probability, highest first.
+  pub probabilities: Vec<(String, f32)>,
+  /// Billed input tokens (`usage.input_tokens`).
+  pub input_tokens: u64,
 }
 
 #[derive(Clone)]
@@ -61,6 +65,13 @@ fn parse_choice(text: &str) -> anyhow::Result<JevChoice> {
   #[derive(Deserialize)]
   struct Response {
     answers: Map<String, Value>,
+    #[serde(default)]
+    usage: Usage,
+  }
+  #[derive(Default, Deserialize)]
+  struct Usage {
+    #[serde(default)]
+    input_tokens: u64,
   }
   #[derive(Deserialize)]
   struct Answer {
@@ -73,7 +84,9 @@ fn parse_choice(text: &str) -> anyhow::Result<JevChoice> {
   let response: Response = serde_json::from_str(text)?;
   let answer: Answer = serde_json::from_value(response.answers.get(QUESTION).cloned().ok_or_else(|| anyhow::anyhow!("Jev didn't answer the routing question"))?)?;
   let probability = answer.probabilities.get(&answer.choice).and_then(Value::as_f64).unwrap_or(0.0) as f32;
-  Ok(JevChoice { confidence: answer.confidence.unwrap_or(probability), probability, choice: answer.choice })
+  let mut probabilities: Vec<(String, f32)> = answer.probabilities.iter().filter_map(|(k, v)| v.as_f64().map(|p| (k.clone(), p as f32))).collect();
+  probabilities.sort_by(|a, b| b.1.total_cmp(&a.1));
+  Ok(JevChoice { confidence: answer.confidence.unwrap_or(probability), probability, choice: answer.choice, probabilities, input_tokens: response.usage.input_tokens })
 }
 
 #[cfg(test)]
@@ -93,7 +106,9 @@ mod tests {
   #[test]
   fn reads_the_choice_and_its_confidence() {
     let text = r#"{"model":"jev-1.13.0","answers":{"route":{"type":"choice","choice":"nano_banana_pro_vertex","probabilities":{"nano_banana_pro_vertex":0.88,"stability_core_bedrock":0.12},"confidence":0.81}},"usage":{"input_tokens":318,"output_tokens":34}}"#;
-    assert_eq!(parse_choice(text).unwrap(), JevChoice { choice: "nano_banana_pro_vertex".into(), probability: 0.88, confidence: 0.81 });
+    let choice = parse_choice(text).unwrap();
+    assert_eq!((choice.choice.as_str(), choice.probability, choice.confidence, choice.input_tokens), ("nano_banana_pro_vertex", 0.88, 0.81, 318));
+    assert_eq!(choice.probabilities, vec![("nano_banana_pro_vertex".to_owned(), 0.88), ("stability_core_bedrock".to_owned(), 0.12)]);
     assert!(parse_choice(r#"{"answers":{}}"#).is_err());
   }
 }

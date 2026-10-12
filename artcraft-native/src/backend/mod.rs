@@ -103,6 +103,8 @@ pub enum Event {
     code: String,
   },
   Credits(u64),
+  /// Local mode: spend on the user's own accounts changed.
+  Spend(local::spend::SpendSummary),
   Models(Modality, Result<Vec<ModelInfo>, String>),
   /// A cost estimate for the request identified by `key`.
   Cost {
@@ -220,7 +222,7 @@ impl Backend {
     // The provider clients need the runtime (their HTTP connectors spawn on it).
     let local = config.local_mode.then(|| {
       let _guard = rt.enter();
-      Arc::new(LocalEngine::new(&root, config, http.clone()))
+      Arc::new(LocalEngine::new(&root, config, local::provider_http_client()))
     });
     Self { rt, ctx, tx, rx, host, root, creds, http, device_login_cancel: Arc::new(AtomicBool::new(false)), accounts, jobs, local }
   }
@@ -238,6 +240,16 @@ impl Backend {
     &self.root
   }
 
+  /// In local mode, how a batch was routed and what it cost (`None` for ArtCraft generations).
+  pub fn generation_record(&self, batch_token: &str) -> Option<local::library::GenerationRecord> {
+    self.local.as_ref().and_then(|l| l.generation(batch_token))
+  }
+
+  /// In local mode, where the spend ledger is saved.
+  pub fn spend_path(&self) -> Option<PathBuf> {
+    self.local.as_ref().map(|l| l.spend_path().to_path_buf())
+  }
+
   /// In local mode, each provider's status line for the settings dialog.
   pub fn local_status(&self) -> Option<Vec<(&'static str, String, bool)>> {
     self.local.as_ref().map(|l| l.status())
@@ -252,8 +264,9 @@ impl Backend {
 
   /// Checks who's signed in (`GET /v1/session`), then fetches their credits.
   pub fn refresh_session(&self) {
-    if self.local.is_some() {
+    if let Some(local) = &self.local {
       let _ = self.tx.send(Event::Session(Some(LocalEngine::user())));
+      let _ = self.tx.send(Event::Spend(local.spend_summary()));
       return;
     }
     let api = self.api();

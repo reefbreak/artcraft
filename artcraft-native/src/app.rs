@@ -20,6 +20,7 @@ use crate::backend::wire::{Character, JobPhase};
 use crate::overlays::account::{LoginAction, LoginDialog, SettingsAction, settings_dialog};
 use crate::overlays::characters::{CharactersAction, CharactersModal};
 use crate::overlays::library_picker::{LibraryPicker, PickerAction};
+use crate::backend::local::spend::SpendSummary;
 use crate::overlays::lightbox::{Lightbox, LightboxAction, fit_inside};
 use crate::overlays::providers::{AccountAction, AccountsView, LoginEvent, MidjourneyLogin, SetupAction, setup_dialog};
 use crate::pages::common::{self, AppRequest, Env, FeedKey};
@@ -78,6 +79,8 @@ pub struct ArtcraftApp {
   catalog: Catalog,
   user: Option<SessionUser>,
   credits: Option<u64>,
+  /// Local mode: spend on the user's own accounts.
+  spend: Option<SpendSummary>,
   page: Page,
   enter_to_generate: bool,
   view_mode: ViewMode,
@@ -132,7 +135,8 @@ impl ArtcraftApp {
       backend.load_models(modality);
     }
     backend.refresh_session();
-    let mut app = Self { cache, player, toasts: Toasts::default(), catalog: Catalog::default(), user: None, credits: None, page: saved.page, enter_to_generate: saved.enter_to_generate, view_mode: saved.view_mode, autoplay: saved.autoplay, sidebar_open: saved.sidebar_open, image: CreateImagePage::new(saved.image), video: CreateVideoPage::new(saved.video), audio: CreateAudioPage::new(saved.audio), library: FeedStore::default(), ratios: RatioCache::default(), prompts: HashMap::new(), prompt_records: HashMap::new(), requested_prompts: HashSet::new(), pending_recreate: None, batch_kinds: HashMap::new(), lightbox: None, picker: None, login: None, characters_modal: None, characters: Vec::new(), pending_characters: Vec::new(), settings_open: false, provider_setup: None, midjourney_login: None, fal_key_input: String::new(), preview: None, requests: Vec::new(), screenshot: ScreenshotRequest::from_env(), next_poll: 0.0, next_credits: CREDITS_INTERVAL, models_retry_at: None, backend };
+    let mut app =
+      Self { cache, player, toasts: Toasts::default(), catalog: Catalog::default(), user: None, credits: None, spend: None, page: saved.page, enter_to_generate: saved.enter_to_generate, view_mode: saved.view_mode, autoplay: saved.autoplay, sidebar_open: saved.sidebar_open, image: CreateImagePage::new(saved.image), video: CreateVideoPage::new(saved.video), audio: CreateAudioPage::new(saved.audio), library: FeedStore::default(), ratios: RatioCache::default(), prompts: HashMap::new(), prompt_records: HashMap::new(), requested_prompts: HashSet::new(), pending_recreate: None, batch_kinds: HashMap::new(), lightbox: None, picker: None, login: None, characters_modal: None, characters: Vec::new(), pending_characters: Vec::new(), settings_open: false, provider_setup: None, midjourney_login: None, fal_key_input: String::new(), preview: None, requests: Vec::new(), screenshot: ScreenshotRequest::from_env(), next_poll: 0.0, next_credits: CREDITS_INTERVAL, models_retry_at: None, backend };
     app.restore_provider_jobs();
     // Diagnostics: `ARTCRAFT_OPEN=settings` or `midjourney-login` opens that dialog at launch.
     match std::env::var("ARTCRAFT_OPEN").as_deref() {
@@ -187,6 +191,7 @@ impl ArtcraftApp {
         }
       },
       Event::Credits(credits) => self.credits = Some(credits),
+      Event::Spend(summary) => self.spend = Some(summary),
       Event::Models(modality, Ok(models)) => match modality {
         Modality::Image => self.catalog.set_image(models),
         Modality::Video => self.catalog.set_video(models),
@@ -578,7 +583,8 @@ impl ArtcraftApp {
 
   /// The title bar and the sidebar (both on the window chrome).
   fn shell(&mut self, ui: &mut Ui) {
-    let account = Account { username: self.user.as_ref().map(|u| u.username.as_str()), display_name: self.user.as_ref().map(|u| u.display_name.as_str()).filter(|n| !n.is_empty()), credits: self.credits };
+    let spend_path = self.backend.spend_path();
+    let account = Account { username: self.user.as_ref().map(|u| u.username.as_str()), display_name: self.user.as_ref().map(|u| u.display_name.as_str()).filter(|n| !n.is_empty()), credits: self.credits, spend: self.spend.as_ref(), spend_path: spend_path.as_deref() };
     let mark = creator_icons::texture(ui.ctx(), "artcraft");
     let mut actions = Vec::new();
     let chrome = egui::Frame::NONE.fill(theme::CHROME);
@@ -676,7 +682,8 @@ impl ArtcraftApp {
       match self.find_item(&token).cloned() {
         Some(item) => {
           let prompt = item.prompt_token.as_ref().and_then(|t| self.prompt_records.get(t));
-          let actions = self.lightbox.as_mut().map(|lb| lb.show(ctx, &item, &order, prompt, &self.catalog, &mut self.cache, &mut self.player)).unwrap_or_default();
+          let routing = item.batch_token.as_deref().and_then(|b| self.backend.generation_record(b));
+          let actions = self.lightbox.as_mut().map(|lb| lb.show(ctx, &item, &order, prompt, routing.as_ref(), &self.catalog, &mut self.cache, &mut self.player)).unwrap_or_default();
           for action in actions {
             self.lightbox_action(ctx, action, &item);
           }

@@ -81,6 +81,53 @@ struct Index {
   /// Newest first.
   files: Vec<MediaFile>,
   prompts: Vec<Prompt>,
+  /// How each batch was made (routing and cost), newest first.
+  generations: Vec<GenerationRecord>,
+}
+
+/// How a generation was routed and what it cost, shown beside its results in the lightbox.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GenerationRecord {
+  pub batch_token: String,
+  /// The model picked in the UI (`auto_image` for Auto).
+  pub requested_model: String,
+  pub chosen_model: String,
+  pub chosen_name: String,
+  /// `Vertex AI` or `Bedrock`.
+  pub provider: String,
+  pub upstream_model: String,
+  /// `user`, `only_fit`, `jev`, `rules_jev_unsure`, `rules_jev_unavailable` or `rules`.
+  pub decided_by: String,
+  pub maybe_jev: Option<JevRecord>,
+  /// Models that could honor the settings.
+  pub candidates: Vec<String>,
+  /// Models that couldn't, with the setting that ruled them out.
+  pub ruled_out: Vec<(String, String)>,
+  /// The provider's charge for the batch, at list prices.
+  pub cost_usd: f64,
+  /// Jev's charge for routing it.
+  pub routing_cost_usd: f64,
+  /// How the cost was worked out, e.g. `2 × 1,120 image tokens`.
+  pub cost_basis: String,
+  pub outputs: u32,
+  /// Wall time from routing to saved results.
+  pub seconds: f32,
+}
+
+/// Jev's answer for a generation.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JevRecord {
+  pub model: String,
+  /// The model Jev picked, by name.
+  pub choice: String,
+  pub confidence: f32,
+  /// The bar a pick had to clear to be used.
+  pub min_confidence: f32,
+  /// Every option, by name, highest first.
+  pub probabilities: Vec<(String, f32)>,
+  pub input_tokens: u64,
 }
 
 impl LocalLibrary {
@@ -141,6 +188,20 @@ impl LocalLibrary {
     prompt.token = token.clone();
     self.mutate(|index| index.prompts.insert(0, prompt))?;
     Ok(token)
+  }
+
+  /// Records how a batch was made.
+  pub fn add_generation(&self, record: GenerationRecord) -> anyhow::Result<()> {
+    self.mutate(|index| index.generations.insert(0, record))
+  }
+
+  pub fn generation(&self, batch_token: &str) -> Option<GenerationRecord> {
+    self.index.lock().ok()?.generations.iter().find(|g| g.batch_token == batch_token).cloned()
+  }
+
+  /// The directory the library lives in.
+  pub fn dir(&self) -> &Path {
+    &self.dir
   }
 
   pub fn prompt(&self, token: &str) -> Option<Prompt> {
@@ -253,6 +314,15 @@ mod tests {
     reloaded.delete(&first.token).unwrap();
     assert!(reloaded.get(&first.token).is_none());
     assert!(!dir.join(DIRECTORY).join(MEDIA_DIRECTORY).join(format!("{}.png", first.token)).exists());
+    let _ = std::fs::remove_dir_all(dir);
+  }
+
+  #[test]
+  fn generation_records_survive_a_restart() {
+    let dir = temp_root();
+    let record = GenerationRecord { batch_token: "batch_local_1".into(), chosen_name: "Nano Banana Pro".into(), decided_by: "jev".into(), maybe_jev: Some(JevRecord { choice: "Nano Banana Pro".into(), confidence: 0.81, ..Default::default() }), cost_usd: 0.268, ..Default::default() };
+    LocalLibrary::load(&dir).add_generation(record.clone()).unwrap();
+    assert_eq!(LocalLibrary::load(&dir).generation("batch_local_1"), Some(record));
     let _ = std::fs::remove_dir_all(dir);
   }
 

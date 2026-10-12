@@ -6,7 +6,7 @@ use serde_json::{Map, Value, json};
 
 use super::catalog::{self, LocalModel};
 use super::config::LocalConfig;
-use super::jev::JevClient;
+use super::jev::{JevChoice, JevClient};
 use crate::backend::Modality;
 use crate::models::ModelInfo;
 
@@ -56,11 +56,62 @@ impl Request {
   }
 }
 
-/// The model that will run a request, and how it was chosen (for the toast).
+/// The model that will run a request, and how it was chosen (for the toast and the lightbox).
 #[derive(Clone, Debug)]
 pub struct Decision {
   pub model: LocalModel,
-  pub reason: String,
+  pub decided_by: DecidedBy,
+  /// Jev's answer, when it was asked (even if its pick wasn't used).
+  pub jev: Option<JevChoice>,
+  /// Models that could honor the settings, by name.
+  pub candidates: Vec<String>,
+  /// Models that couldn't, by name with the reason.
+  pub ruled_out: Vec<(String, &'static str)>,
+}
+
+/// Who chose the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecidedBy {
+  /// The user picked a specific model.
+  User,
+  /// Auto, and only one model fit.
+  OnlyFit,
+  /// Auto, Jev's pick (confident enough).
+  Jev,
+  /// Auto, Jev answered below the confidence bar.
+  RulesJevUnsure,
+  /// Auto, Jev couldn't be reached or answered with an unknown option.
+  RulesJevUnavailable,
+  /// Auto, no Jev key.
+  Rules,
+}
+
+impl DecidedBy {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      DecidedBy::User => "user",
+      DecidedBy::OnlyFit => "only_fit",
+      DecidedBy::Jev => "jev",
+      DecidedBy::RulesJevUnsure => "rules_jev_unsure",
+      DecidedBy::RulesJevUnavailable => "rules_jev_unavailable",
+      DecidedBy::Rules => "rules",
+    }
+  }
+}
+
+impl Decision {
+  /// The toast: which model runs and why.
+  pub fn reason(&self) -> String {
+    let name = &self.model.info.name;
+    match self.decided_by {
+      DecidedBy::User => format!("{name} via {}", self.model.route.provider_label()),
+      DecidedBy::OnlyFit => format!("Auto \u{2192} {name} (the only fit)"),
+      DecidedBy::Jev => format!("Auto \u{2192} {name} (Jev, {:.0}% confident)", self.jev.as_ref().map_or(0.0, |j| j.confidence * 100.0)),
+      DecidedBy::RulesJevUnsure => format!("Auto \u{2192} {name} (Jev unsure, used rules)"),
+      DecidedBy::RulesJevUnavailable => format!("Auto \u{2192} {name} (Jev unavailable, used rules)"),
+      DecidedBy::Rules => format!("Auto \u{2192} {name} (rules)"),
+    }
+  }
 }
 
 /// The model for `request`: the named one, or for Auto, Jev's pick (when its confidence clears
@@ -69,52 +120,69 @@ pub async fn decide(config: &LocalConfig, jev: Option<&JevClient>, modality: Mod
   let auto = matches!(request.model_id.as_str(), catalog::AUTO_IMAGE | catalog::AUTO_VIDEO);
   if !auto {
     let model = catalog::find(config, &request.model_id).ok_or_else(|| anyhow::anyhow!("{} isn't available with your configured accounts", request.model_id))?;
-    return Ok(Decision { reason: format!("{} via {}", model.info.name, model.route.provider_label()), model });
+    return Ok(Decision { candidates: vec![model.info.name.clone()], model, decided_by: DecidedBy::User, jev: None, ruled_out: Vec::new() });
   }
   let candidates = match modality {
     Modality::Video => catalog::video_candidates(config),
     _ => catalog::image_candidates(config),
   };
+  let ruled_out: Vec<(String, &'static str)> = candidates.iter().filter_map(|m| misfit(&m.info, request).map(|why| (m.info.name.clone(), why))).collect();
   let fitting: Vec<LocalModel> = candidates.into_iter().filter(|m| fits(&m.info, request)).collect();
   let Some(fallback) = rule_pick(&fitting, request) else {
     anyhow::bail!("None of your models can do this combination of settings");
   };
+  let names: Vec<String> = fitting.iter().map(|m| m.info.name.clone()).collect();
+  let decision = |model: LocalModel, decided_by: DecidedBy, jev: Option<JevChoice>| Decision { model, decided_by, jev, candidates: names.clone(), ruled_out: ruled_out.clone() };
   if fitting.len() == 1 {
-    return Ok(Decision { reason: format!("Auto \u{2192} {} (the only fit)", fallback.info.name), model: fallback });
+    return Ok(decision(fallback, DecidedBy::OnlyFit, None));
   }
   let Some(jev) = jev else {
-    return Ok(Decision { reason: format!("Auto \u{2192} {} (rules)", fallback.info.name), model: fallback });
+    return Ok(decision(fallback, DecidedBy::Rules, None));
   };
   let options: Vec<(String, String)> = fitting.iter().map(|m| (m.info.id.clone(), format!("{} on {}: {}", m.info.name, m.route.provider_label(), m.strengths))).collect();
   match jev.choose(&request.state(modality), &options).await {
     Ok(choice) => match fitting.iter().find(|m| m.info.id == choice.choice) {
       Some(model) if choice.confidence >= config.jev_min_confidence => {
         info!("Jev routed to {} (p={:.2}, confidence={:.2})", choice.choice, choice.probability, choice.confidence);
-        Ok(Decision { reason: format!("Auto \u{2192} {} (Jev, {:.0}% confident)", model.info.name, choice.confidence * 100.0), model: model.clone() })
+        Ok(decision(model.clone(), DecidedBy::Jev, Some(choice)))
       },
-      Some(_) => Ok(Decision { reason: format!("Auto \u{2192} {} (Jev unsure, used rules)", fallback.info.name), model: fallback }),
+      Some(_) => Ok(decision(fallback, DecidedBy::RulesJevUnsure, Some(choice))),
       None => {
         warn!("Jev picked an unknown option: {}", choice.choice);
-        Ok(Decision { reason: format!("Auto \u{2192} {} (rules)", fallback.info.name), model: fallback })
+        Ok(decision(fallback, DecidedBy::RulesJevUnavailable, Some(choice)))
       },
     },
     Err(err) => {
       warn!("Jev routing failed, using rules: {err}");
-      Ok(Decision { reason: format!("Auto \u{2192} {} (Jev unavailable, used rules)", fallback.info.name), model: fallback })
+      Ok(decision(fallback, DecidedBy::RulesJevUnavailable, None))
     },
   }
 }
 
 /// Whether a model can honor every setting in the request.
 pub fn fits(model: &ModelInfo, request: &Request) -> bool {
-  // A model without resolution options makes about 1K (Stability): it fits standard requests,
-  // not 2K and up.
-  let aspect_ok = request.aspect_ratio.as_ref().is_none_or(|a| model.aspect_ratios.is_empty() || model.aspect_ratios.contains(a));
-  let resolution_ok = request.resolution.as_ref().is_none_or(|r| model.resolutions.contains(r) || (model.resolutions.is_empty() && STANDARD_RESOLUTIONS.contains(&r.as_str())));
-  let refs_ok = request.image_tokens.len() <= model.image_refs_max;
-  let frames_ok = (request.start_frame.is_none() || model.start_frame) && (request.end_frame.is_none() || model.end_frame);
-  let duration_ok = request.duration_seconds.is_none_or(|d| model.duration_options.is_empty() || model.duration_options.contains(&d));
-  aspect_ok && resolution_ok && refs_ok && frames_ok && duration_ok
+  misfit(model, request).is_none()
+}
+
+/// Why a model can't honor the request, if it can't. A model without resolution options makes
+/// about 1K (Stability): it fits standard requests, not 2K and up.
+fn misfit(model: &ModelInfo, request: &Request) -> Option<&'static str> {
+  if request.aspect_ratio.as_ref().is_some_and(|a| !model.aspect_ratios.is_empty() && !model.aspect_ratios.contains(a)) {
+    return Some("aspect ratio");
+  }
+  if request.resolution.as_ref().is_some_and(|r| !model.resolutions.contains(r) && !(model.resolutions.is_empty() && STANDARD_RESOLUTIONS.contains(&r.as_str()))) {
+    return Some("resolution");
+  }
+  if request.image_tokens.len() > model.image_refs_max {
+    return Some("too many references");
+  }
+  if (request.start_frame.is_some() && !model.start_frame) || (request.end_frame.is_some() && !model.end_frame) {
+    return Some("frames");
+  }
+  if request.duration_seconds.is_some_and(|d| !model.duration_options.is_empty() && !model.duration_options.contains(&d)) {
+    return Some("duration");
+  }
+  None
 }
 
 /// The rules: several references go to the model best at combining them; otherwise the first

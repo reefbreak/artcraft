@@ -75,6 +75,18 @@ the rest from the prompt and settings; below `jev_min_confidence`, or without a 
 fitting model in the order above is used (Nano Banana Pro when there are more than three
 references). A toast says which model ran and why.
 
+**Spend meter.** The top bar shows today's spend on your accounts next to the profile icon; click
+it for today and this month by account (Google Cloud, AWS Bedrock, Jev). The app meters each call
+itself, because neither cloud reports spend in real time: Gemini by the tokens the reply reports,
+Veo by seconds of video, Stability per image, Jev by input tokens, all at October 2026 list prices
+(`src/backend/local/pricing.rs`). Override a rate in `local_providers.json` under `"prices"`, e.g.
+`{ "stability.sd3-5-large-v1:0": 0.065 }`. The ledger is `~/Artcraft/local/spend.json`.
+
+**Routing panel.** The lightbox's side column shows how each local generation was made: what was
+requested, who decided (Jev with its confidence, the rules, or you), the model and API model that
+ran, Jev's odds for every option against the confidence bar, which models were ruled out and why,
+the cost and how long it took.
+
 Not in local mode yet: audio models, characters, cost estimates, and Bedrock video (Amazon Nova
 Reel was retired on 2026-09-30; Luma Ray2 needs an S3 bucket). The code is in
 `src/backend/local/`.

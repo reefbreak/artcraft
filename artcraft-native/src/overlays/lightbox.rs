@@ -1,9 +1,10 @@
 //! The lightbox (`lightbox-modal`): the media large on black (audio as a player panel), prev/next
 //! through the feed, and a side column with the prompt, details and actions.
 
-use egui::{Align2, Color32, FontId, Id, Key, Rect, Sense, Ui, pos2, vec2};
+use egui::{Align2, Color32, FontId, Id, Key, Rect, Sense, Stroke, Ui, pos2, vec2};
 
 use crate::backend::audio::AudioPlayer;
+use crate::backend::local::library::GenerationRecord;
 use crate::backend::media_cache::{Lookup, MediaCache};
 use crate::backend::video::{self, VideoPlayer};
 use crate::backend::wire::Prompt;
@@ -46,7 +47,8 @@ impl Lightbox {
   }
 
   #[allow(clippy::too_many_arguments)]
-  pub fn show(&mut self, ctx: &egui::Context, item: &FeedItem, order: &[String], prompt: Option<&Prompt>, names: &dyn ModelNames, cache: &mut MediaCache, audio: &mut AudioPlayer) -> Vec<LightboxAction> {
+  /// `routing` is local mode's record of how the item's batch was routed and what it cost.
+  pub fn show(&mut self, ctx: &egui::Context, item: &FeedItem, order: &[String], prompt: Option<&Prompt>, routing: Option<&GenerationRecord>, names: &dyn ModelNames, cache: &mut MediaCache, audio: &mut AudioPlayer) -> Vec<LightboxAction> {
     let mut actions = Vec::new();
     let screen = ctx.content_rect();
     let size = vec2((screen.width() - 80.0).min(1200.0), (screen.height() - 80.0).min(760.0));
@@ -74,7 +76,11 @@ impl Lightbox {
         ui.add_space(16.0);
         ui.vertical(|ui| {
           ui.set_width(SIDE_WIDTH);
-          self.side(ui, item, prompt, names, cache, &mut actions);
+          // The routing panel can outgrow the column: let it scroll.
+          egui::ScrollArea::vertical().id_salt("lightbox-side").auto_shrink([false, false]).show(ui, |ui| {
+            ui.set_width(SIDE_WIDTH - 8.0);
+            self.side(ui, item, prompt, routing, names, cache, &mut actions);
+          });
         });
       });
     });
@@ -162,7 +168,8 @@ impl Lightbox {
     }
   }
 
-  fn side(&mut self, ui: &mut Ui, item: &FeedItem, prompt: Option<&Prompt>, names: &dyn ModelNames, cache: &mut MediaCache, actions: &mut Vec<LightboxAction>) {
+  #[allow(clippy::too_many_arguments)]
+  fn side(&mut self, ui: &mut Ui, item: &FeedItem, prompt: Option<&Prompt>, routing: Option<&GenerationRecord>, names: &dyn ModelNames, cache: &mut MediaCache, actions: &mut Vec<LightboxAction>) {
     ui.horizontal(|ui| {
       widgets::hud(ui, item.kind.label(), theme::MUTED);
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -247,6 +254,11 @@ impl Lightbox {
       });
     }
 
+    if let Some(record) = routing {
+      ui.add_space(14.0);
+      routing_section(ui, record);
+    }
+
     ui.add_space(16.0);
     let w = (ui.available_width() - 8.0) / 2.0;
     // Audio can't be recreated yet (`Audio v1`).
@@ -306,6 +318,71 @@ fn audio_panel(ui: &mut Ui, rect: Rect, item: &FeedItem, audio: &mut AudioPlayer
   waveform::player(&mut child, Id::new(("lightbox-player", &item.token)), audio, &item.full_url, item.duration_secs, false);
 }
 
+/// Local mode: how the generation was routed (Jev's call and the odds it gave each model), what
+/// ran it, and what it cost.
+fn routing_section(ui: &mut Ui, r: &GenerationRecord) {
+  widgets::hud(ui, "Routing", theme::FAINT);
+  ui.add_space(4.0);
+  let text = |ui: &mut Ui, t: String| {
+    ui.label(egui::RichText::new(t).size(12.5));
+  };
+  let auto = r.requested_model.starts_with("auto_");
+  info_row(ui, "Requested", |ui| text(ui, if auto { "Auto".to_owned() } else { r.chosen_name.clone() }));
+  let decided = match (r.decided_by.as_str(), &r.maybe_jev) {
+    ("jev", Some(j)) => format!("Jev, {:.0}% confident", j.confidence * 100.0),
+    ("rules_jev_unsure", Some(j)) => format!("Rules (Jev {:.0}% < {:.0}%)", j.confidence * 100.0, j.min_confidence * 100.0),
+    ("rules_jev_unavailable", _) => "Rules (Jev unavailable)".to_owned(),
+    ("only_fit", _) => "Only model that fit".to_owned(),
+    ("rules", _) => "Rules (no Jev key)".to_owned(),
+    _ => "You".to_owned(),
+  };
+  info_row(ui, "Decided by", |ui| text(ui, decided));
+  info_row(ui, "Ran on", |ui| text(ui, format!("{} \u{b7} {}", r.chosen_name, r.provider)));
+  info_row(ui, "API model", |ui| {
+    ui.label(egui::RichText::new(&r.upstream_model).size(11.5).family(theme::mono()).color(theme::MUTED));
+  });
+
+  if let Some(jev) = &r.maybe_jev {
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new(format!("Jev's odds \u{b7} {}", jev.model)).size(11.5).color(theme::FAINT));
+    ui.add_space(2.0);
+    for (name, p) in &jev.probabilities {
+      odds_bar(ui, name, *p, *name == r.chosen_name, jev.min_confidence);
+    }
+    ui.label(egui::RichText::new(format!("Picks under {:.0}% confidence fall back to the rules.", jev.min_confidence * 100.0)).size(11.0).color(theme::FAINT));
+  }
+  if !r.ruled_out.is_empty() {
+    ui.add_space(6.0);
+    let list: Vec<String> = r.ruled_out.iter().map(|(name, why)| format!("{name} ({why})")).collect();
+    ui.label(egui::RichText::new(format!("Ruled out: {}", list.join(", "))).size(11.5).color(theme::MUTED));
+  }
+
+  ui.add_space(8.0);
+  info_row(ui, "Cost", |ui| {
+    ui.label(egui::RichText::new(crate::shell::usd(r.cost_usd + r.routing_cost_usd)).size(12.5).family(theme::mono_bold()));
+  });
+  ui.label(egui::RichText::new(if r.routing_cost_usd > 0.0 { format!("{} + Jev routing {}", r.cost_basis, crate::shell::usd(r.routing_cost_usd)) } else { r.cost_basis.clone() }).size(11.5).color(theme::MUTED));
+  info_row(ui, "Took", |ui| text(ui, format!("{:.1}s", r.seconds)));
+}
+
+/// One of Jev's options: name, a bar to scale, and its probability. The pick is in the accent.
+fn odds_bar(ui: &mut Ui, name: &str, p: f32, picked: bool, threshold: f32) {
+  let width = ui.available_width();
+  let (rect, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+  let painter = ui.painter();
+  let label_w = 118.0;
+  let pct_w = 38.0;
+  painter.text(rect.left_center(), Align2::LEFT_CENTER, name, FontId::new(11.5, egui::FontFamily::Proportional), if picked { theme::INK } else { theme::MUTED });
+  let track = Rect::from_min_max(pos2(rect.left() + label_w, rect.center().y - 3.0), pos2(rect.right() - pct_w, rect.center().y + 3.0));
+  painter.rect_filled(track, 2.0, theme::WASH_HOVER);
+  let fill = Rect::from_min_max(track.min, pos2(track.left() + track.width() * p.clamp(0.0, 1.0), track.max.y));
+  painter.rect_filled(fill, 2.0, if picked { theme::ACCENT } else { theme::LINE_STRONG });
+  // The confidence bar Jev's pick has to clear.
+  let x = track.left() + track.width() * threshold.clamp(0.0, 1.0);
+  painter.vline(x, (track.top() - 3.0)..=(track.bottom() + 3.0), Stroke::new(1.0, theme::FAINT));
+  painter.text(pos2(rect.right(), rect.center().y), Align2::RIGHT_CENTER, format!("{:.0}%", p * 100.0), FontId::new(11.5, theme::mono()), if picked { theme::INK } else { theme::MUTED });
+}
+
 fn info_row(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui)) {
   ui.horizontal(|ui| {
     let (rect, _) = ui.allocate_exact_size(vec2(96.0, 20.0), Sense::hover());
@@ -321,4 +398,33 @@ pub fn fit_inside(content: egui::Vec2, bounds: egui::Vec2) -> egui::Vec2 {
   }
   let scale = (bounds.x / content.x).min(bounds.y / content.y);
   content * scale
+}
+
+#[cfg(test)]
+mod tests {
+  use egui_kittest::Harness;
+  use egui_kittest::kittest::Queryable;
+
+  use super::*;
+  use crate::backend::local::library::JevRecord;
+
+  /// The routing panel shows Jev's call, what ran, and the cost (rendered headlessly).
+  #[test]
+  fn routing_panel_shows_the_decision_and_cost() {
+    let record = GenerationRecord { requested_model: "auto_image".into(), chosen_name: "Nano Banana Pro".into(), provider: "Vertex AI".into(), upstream_model: "gemini-3-pro-image".into(), decided_by: "jev".into(), maybe_jev: Some(JevRecord { model: "jev-1.13.0".into(), choice: "Nano Banana Pro".into(), confidence: 0.81, min_confidence: 0.35, probabilities: vec![("Nano Banana Pro".into(), 0.88), ("Nano Banana 2".into(), 0.12)], input_tokens: 318 }), ruled_out: vec![("Nano Banana 2 Lite".into(), "resolution".into())], cost_usd: 0.268, routing_cost_usd: 0.000_013, cost_basis: "2 images \u{b7} 2,240 image tokens".into(), outputs: 2, seconds: 14.2, ..Default::default() };
+    let mut fonts_ready = false;
+    let mut harness = Harness::builder().with_size(egui::vec2(360.0, 600.0)).build_ui(move |ui| {
+      if !fonts_ready {
+        crate::theme::apply(ui.ctx());
+        fonts_ready = true;
+        return;
+      }
+      routing_section(ui, &record);
+    });
+    harness.run();
+    for text in ["Auto", "Jev, 81% confident", "Nano Banana Pro \u{b7} Vertex AI", "gemini-3-pro-image", "Ruled out: Nano Banana 2 Lite (resolution)", "$0.27", "14.2s"] {
+      harness.get_by_label(text);
+    }
+    harness.get_by_label_contains("+ Jev routing <$0.01");
+  }
 }

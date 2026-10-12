@@ -10,10 +10,13 @@ pub mod catalog;
 pub mod config;
 pub mod jev;
 pub mod library;
+pub mod pricing;
 pub mod router;
+pub mod spend;
 pub mod vertex;
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -28,8 +31,10 @@ use bedrock::{BedrockClient, StabilityRequest};
 use catalog::Route;
 use config::LocalConfig;
 use jev::JevClient;
-use library::{LocalLibrary, MediaClass, NewFile, Origin};
+use library::{GenerationRecord, JevRecord, LocalLibrary, MediaClass, NewFile, Origin};
+use pricing::{GeminiUsage, PriceBook};
 use router::{Decision, Request};
+use spend::{Account, SpendEntry, SpendLedger, SpendSummary};
 use vertex::{GeminiImageRequest, VeoRequest, VertexClient};
 
 pub const LOCAL_USERNAME: &str = "local";
@@ -43,6 +48,13 @@ const PROVIDER_IMAGE_TYPES: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
 /// Thumbnails in the feed are this wide (the media cache resizes; local files have one size).
 const THUMBNAIL_WIDTH: u32 = 256;
 
+/// The provider calls' own HTTP client. HTTP/1.1 only: replies carrying a whole image or video
+/// as base64 (several MB) arrive over HTTP/2 as a flood of small DATA frames on some networks,
+/// which the h2 crate rejects as abuse ("too_many_data_frames"). Timeouts are per request.
+pub fn provider_http_client() -> reqwest::Client {
+  reqwest::Client::builder().http1_only().connect_timeout(Duration::from_secs(30)).pool_idle_timeout(Duration::from_secs(60)).build().unwrap_or_default()
+}
+
 /// An image handed to a provider.
 #[derive(Clone, Debug)]
 pub struct RefImage {
@@ -55,6 +67,8 @@ pub struct RefImage {
 pub struct GeneratedFile {
   pub bytes: Vec<u8>,
   pub extension: &'static str,
+  /// Gemini's reported token counts, for the spend meter.
+  pub usage: Option<GeminiUsage>,
 }
 
 pub struct LocalEngine {
@@ -64,6 +78,8 @@ pub struct LocalEngine {
   bedrock: BedrockClient,
   jev: Option<JevClient>,
   jobs: Arc<Mutex<Vec<Job>>>,
+  prices: PriceBook,
+  spend: SpendLedger,
 }
 
 impl LocalEngine {
@@ -71,7 +87,9 @@ impl LocalEngine {
     LocalConfig::write_template_if_missing(data_root);
     let jev = config.jev_api_key.clone().map(|key| JevClient::new(http.clone(), key, config.jev_model.clone()));
     info!("Local mode: Vertex {}, Veo {}, Bedrock {}, Jev {}", config.vertex_enabled(), config.veo_enabled(), config.bedrock_enabled(), jev.is_some());
-    Self { library: LocalLibrary::load(data_root), vertex: VertexClient::new(http, config.clone()), bedrock: BedrockClient::new(config.clone()), jev, jobs: Arc::new(Mutex::new(Vec::new())), config }
+    let library = LocalLibrary::load(data_root);
+    let spend = SpendLedger::load(library.dir());
+    Self { vertex: VertexClient::new(http, config.clone()), bedrock: BedrockClient::new(config.clone()), jev, jobs: Arc::new(Mutex::new(Vec::new())), prices: PriceBook::new(config.prices.clone()), spend, library, config }
   }
 
   /// Who the app shows as signed in.
@@ -93,6 +111,21 @@ impl LocalEngine {
 
   pub fn library(&self) -> &LocalLibrary {
     &self.library
+  }
+
+  /// Today's, this month's and all-time spend on the user's accounts, from this app's calls.
+  pub fn spend_summary(&self) -> SpendSummary {
+    self.spend.summary()
+  }
+
+  /// Where the spend ledger is saved.
+  pub fn spend_path(&self) -> &Path {
+    self.spend.path()
+  }
+
+  /// How a batch was routed and what it cost.
+  pub fn generation(&self, batch_token: &str) -> Option<GenerationRecord> {
+    self.library.generation(batch_token)
   }
 
   /// One line per provider for the settings dialog: name, what's configured, and whether it's on.
@@ -157,8 +190,14 @@ impl LocalEngine {
   }
 
   async fn run(&self, modality: Modality, request: &Request, job_token: &str, tx: &Sender<Event>) -> anyhow::Result<Vec<MediaFile>> {
-    let Decision { model, reason } = router::decide(&self.config, self.jev.as_ref(), modality, request).await?;
-    let _ = tx.send(Event::Toast { error: false, message: reason });
+    let started = Instant::now();
+    let decision = router::decide(&self.config, self.jev.as_ref(), modality, request).await?;
+    info!("Routing {job_token}: {}", decision.reason());
+    let _ = tx.send(Event::Toast { error: false, message: decision.reason() });
+    let batch = LocalLibrary::new_batch_token();
+    // Jev bills for the routing call whether or not the generation succeeds.
+    let routing_cost = decision.jev.as_ref().map_or(0.0, |j| self.prices.jev_call(j.input_tokens));
+    self.charge(tx, vec![(Account::Jev, routing_cost, "jev".to_owned())], &batch);
     let prompt_token = self.record_prompt(request).map_err(|err| warn!("Couldn't save the prompt record: {err}")).ok();
     self.set_prompt_token(job_token, prompt_token.clone());
     let images = self.load_images(&request.image_tokens)?;
@@ -167,16 +206,26 @@ impl LocalEngine {
     if end.is_some() && start.is_none() {
       anyhow::bail!("An ending frame needs a starting frame too");
     }
+    let model = &decision.model;
     let aspect = request.aspect_ratio.as_deref().filter(|a| model.info.aspect_ratios.iter().any(|m| m == a)).and_then(catalog::aspect_ratio);
     let resolution = request.resolution.as_deref().filter(|r| model.info.resolutions.iter().any(|m| m == r));
-    let files: Vec<GeneratedFile> = match model.route {
+    let (files, cost, basis, account, upstream): (Vec<GeneratedFile>, f64, String, Account, &str) = match model.route {
       Route::GeminiImage { model: upstream } => {
-        let calls = (0..request.batch_count).map(|_| self.vertex.generate_image(GeminiImageRequest { model: upstream, prompt: &request.prompt, images: &images, aspect_ratio: aspect, image_size: resolution.and_then(catalog::image_size) }));
-        collect_batch(join_all(calls).await)?
+        let size = resolution.and_then(catalog::image_size);
+        let calls = (0..request.batch_count).map(|_| self.vertex.generate_image(GeminiImageRequest { model: upstream, prompt: &request.prompt, images: &images, aspect_ratio: aspect, image_size: size }));
+        let files = collect_batch(join_all(calls).await)?;
+        let cost: f64 = files.iter().filter_map(|f| self.prices.gemini_call(upstream, f.usage, size)).sum();
+        let image_tokens: u64 = files.iter().filter_map(|f| f.usage.and_then(|u| u.image_tokens)).sum();
+        let basis = if image_tokens > 0 { format!("{} image{} \u{b7} {} image tokens", files.len(), plural(files.len()), group(image_tokens)) } else { format!("{} image{} at {} list price", files.len(), plural(files.len()), size.unwrap_or("1K")) };
+        (files, cost, basis, Account::Vertex, upstream)
       },
       Route::Stability { model: upstream } => {
         let calls = (0..request.batch_count).map(|_| self.bedrock.generate_image(StabilityRequest { model: upstream, prompt: &request.prompt, aspect_ratio: aspect, image: images.first() }));
-        collect_batch(join_all(calls).await)?
+        let files = collect_batch(join_all(calls).await)?;
+        let each = self.prices.stability_per_image(upstream).unwrap_or(0.0);
+        let basis = format!("{} image{} \u{d7} ${each:.3}", files.len(), plural(files.len()));
+        let cost = each * files.len() as f64;
+        (files, cost, basis, Account::Bedrock, upstream)
       },
       Route::Veo { model: upstream } => {
         let resolution = resolution.and_then(catalog::video_resolution);
@@ -185,13 +234,31 @@ impl LocalEngine {
           Some("1080p" | "4k") => Some(VEO_HD_SECONDS),
           _ => request.duration_seconds.filter(|d| model.info.duration_options.contains(d)).or(model.info.duration_default),
         };
-        self.vertex.generate_video(VeoRequest { model: upstream, prompt: &request.prompt, start_frame: start.as_ref(), end_frame: end.as_ref(), aspect_ratio: aspect, resolution, duration_seconds: duration, sample_count: request.batch_count, generate_audio: request.generate_audio }).await?
+        let files = self.vertex.generate_video(VeoRequest { model: upstream, prompt: &request.prompt, start_frame: start.as_ref(), end_frame: end.as_ref(), aspect_ratio: aspect, resolution, duration_seconds: duration, sample_count: request.batch_count, generate_audio: request.generate_audio }).await?;
+        // Veo 3.x makes sound unless told not to.
+        let audio = request.generate_audio.unwrap_or(true);
+        let seconds = f64::from(duration.unwrap_or(VEO_HD_SECONDS)) * files.len() as f64;
+        let rate = self.prices.veo_per_second(upstream, audio, resolution.unwrap_or("720p")).unwrap_or(0.0);
+        let basis = format!("{seconds:.0}s {} at ${rate:.2}/s", if audio { "with audio" } else { "silent" });
+        (files, seconds * rate, basis, Account::Vertex, upstream)
       },
     };
-    let batch = LocalLibrary::new_batch_token();
+    self.charge(tx, vec![(account, cost, upstream.to_owned())], &batch);
     let class = if modality == Modality::Video { MediaClass::Video } else { MediaClass::Image };
     // Saving writes files (and runs FFmpeg for video posters): keep it off the async workers.
-    tokio::task::block_in_place(|| files.iter().map(|f| self.library.add(NewFile { bytes: &f.bytes, extension: f.extension, class, origin: Origin::Generated, maybe_batch_token: Some(&batch), maybe_prompt_token: prompt_token.as_deref(), maybe_model_id: Some(&model.info.id) })).collect())
+    let saved: Vec<MediaFile> = tokio::task::block_in_place(|| files.iter().map(|f| self.library.add(NewFile { bytes: &f.bytes, extension: f.extension, class, origin: Origin::Generated, maybe_batch_token: Some(&batch), maybe_prompt_token: prompt_token.as_deref(), maybe_model_id: Some(&model.info.id) })).collect::<anyhow::Result<_>>())?;
+    let record = generation_record(&self.config, request, &decision, &batch, upstream, cost, routing_cost, basis, saved.len(), started);
+    if let Err(err) = self.library.add_generation(record) {
+      warn!("Couldn't save the routing record: {err}");
+    }
+    Ok(saved)
+  }
+
+  /// Records charges against the user's accounts and tells the top bar.
+  fn charge(&self, tx: &Sender<Event>, charges: Vec<(Account, f64, String)>, batch: &str) {
+    let at = chrono::Utc::now();
+    self.spend.record(charges.into_iter().map(|(account, usd, item)| SpendEntry { at, account, usd, item, maybe_batch_token: Some(batch.to_owned()) }).collect());
+    let _ = tx.send(Event::Spend(self.spend.summary()));
   }
 
   /// Marks the job done (with its first result, which points the feed at the batch) or failed.
@@ -249,6 +316,36 @@ impl LocalEngine {
     };
     Ok(RefImage { mime_type: mime_type.to_owned(), bytes })
   }
+}
+
+/// What the lightbox shows about how a batch was made.
+#[allow(clippy::too_many_arguments)]
+fn generation_record(config: &LocalConfig, request: &Request, decision: &Decision, batch: &str, upstream: &str, cost: f64, routing_cost: f64, cost_basis: String, outputs: usize, started: Instant) -> GenerationRecord {
+  let model = &decision.model;
+  let name_of = |id: &str| catalog::find(config, id).map_or_else(|| id.to_owned(), |m| m.info.name);
+  let maybe_jev = decision.jev.as_ref().map(|j| JevRecord { model: config.jev_model.clone(), choice: name_of(&j.choice), confidence: j.confidence, min_confidence: config.jev_min_confidence, probabilities: j.probabilities.iter().map(|(id, p)| (name_of(id), *p)).collect(), input_tokens: j.input_tokens });
+  GenerationRecord { batch_token: batch.to_owned(), requested_model: request.model_id.clone(), chosen_model: model.info.id.clone(), chosen_name: model.info.name.clone(), provider: model.route.provider_label().to_owned(), upstream_model: upstream.to_owned(), decided_by: decision.decided_by.as_str().to_owned(), maybe_jev, candidates: decision.candidates.clone(), ruled_out: decision.ruled_out.iter().map(|(n, why)| (n.clone(), (*why).to_owned())).collect(), cost_usd: cost, routing_cost_usd: routing_cost, cost_basis, outputs: outputs as u32, seconds: started.elapsed().as_secs_f32() }
+}
+
+fn plural(n: usize) -> &'static str {
+  if n == 1 {
+    ""
+  } else {
+    "s"
+  }
+}
+
+/// `1120` → `1,120`.
+fn group(n: u64) -> String {
+  let digits = n.to_string();
+  let mut out = String::new();
+  for (i, c) in digits.chars().enumerate() {
+    if i > 0 && (digits.len() - i) % 3 == 0 {
+      out.push(',');
+    }
+    out.push(c);
+  }
+  out
 }
 
 /// Every result of a batch; one failure is tolerated when others succeeded.
@@ -315,7 +412,15 @@ mod tests {
     let prompt = engine.library().prompt(job.request.maybe_prompt_token.as_deref().unwrap()).unwrap();
     assert_eq!(prompt.maybe_model_type.as_deref(), Some("auto_image"), "Recreate goes back through Auto");
 
-    let toast = rx.try_iter().find_map(|e| match e {
+    // Spend: two 2K images at the per-image list price (the fake reply reports no token counts).
+    let record = engine.generation(result.maybe_batch_token.as_deref().unwrap()).unwrap();
+    assert_eq!((record.decided_by.as_str(), record.chosen_name.as_str(), record.provider.as_str(), record.outputs), ("rules", "Nano Banana 2", "Vertex AI", 2));
+    assert!((record.cost_usd - 2.0 * 1680.0 * 60.0 / 1e6).abs() < 1e-9, "{}", record.cost_usd);
+    assert!(record.ruled_out.iter().any(|(name, why)| name == "Nano Banana 2 Lite" && why == "resolution"));
+    assert!((engine.spend_summary().today.vertex - record.cost_usd).abs() < 1e-9);
+    let events: Vec<Event> = rx.try_iter().collect();
+    assert!(events.iter().any(|e| matches!(e, Event::Spend(s) if s.today.vertex > 0.0)), "the top bar hears about the charge");
+    let toast = events.into_iter().find_map(|e| match e {
       Event::Toast { message, .. } => Some(message),
       _ => None,
     });
@@ -347,7 +452,7 @@ mod tests {
 
   #[test]
   fn a_partly_failed_batch_keeps_its_images() {
-    let ok = || Ok(GeneratedFile { bytes: vec![1], extension: "png" });
+    let ok = || Ok(GeneratedFile { bytes: vec![1], extension: "png", usage: None });
     assert_eq!(collect_batch(vec![ok(), Err(anyhow::anyhow!("blocked"))]).unwrap().len(), 1);
     assert!(collect_batch(vec![Err(anyhow::anyhow!("blocked"))]).is_err());
   }

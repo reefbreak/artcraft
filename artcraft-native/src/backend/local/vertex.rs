@@ -18,6 +18,7 @@ use tokio::sync::OnceCell;
 use super::GeneratedFile;
 use super::RefImage;
 use super::config::LocalConfig;
+use super::pricing::GeminiUsage;
 
 const SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -75,7 +76,9 @@ impl VertexClient {
       },
       (None, None) => anyhow::bail!("Set a Google Cloud project (or a Vertex API key) in local_providers.json"),
     };
-    first_image(&response)
+    let mut file = first_image(&response)?;
+    file.usage = usage(&response);
+    Ok(file)
   }
 
   /// Starts a Veo job and waits for it, returning every video it made.
@@ -92,7 +95,7 @@ impl VertexClient {
       let status = match self.post_with_token(&format!("{model_path}:fetchPredictOperation"), &json!({ "operationName": operation }), IMAGE_TIMEOUT).await {
         Ok(status) => status,
         Err(err) if tokio::time::Instant::now() < deadline => {
-          warn!("Polling Veo failed (will retry): {err}");
+          warn!("Polling Veo failed (will retry): {err:#}");
           continue;
         },
         Err(err) => return Err(err),
@@ -115,9 +118,9 @@ impl VertexClient {
     let mut out = Vec::new();
     for video in videos {
       if let Some(data) = video.get("bytesBase64Encoded").and_then(Value::as_str) {
-        out.push(GeneratedFile { bytes: BASE64.decode(data)?, extension: "mp4" });
+        out.push(GeneratedFile { bytes: BASE64.decode(data)?, extension: "mp4", usage: None });
       } else if let Some(uri) = video.get("gcsUri").and_then(Value::as_str) {
-        out.push(GeneratedFile { bytes: self.download_gcs(uri).await?, extension: "mp4" });
+        out.push(GeneratedFile { bytes: self.download_gcs(uri).await?, extension: "mp4", usage: None });
       }
     }
     if out.is_empty() {
@@ -217,7 +220,7 @@ fn first_image(response: &Value) -> anyhow::Result<GeneratedFile> {
       }
       if let Some(data) = part.pointer("/inlineData/data").and_then(Value::as_str) {
         let mime = part.pointer("/inlineData/mimeType").and_then(Value::as_str).unwrap_or("image/png");
-        return Ok(GeneratedFile { bytes: BASE64.decode(data)?, extension: extension_for(mime) });
+        return Ok(GeneratedFile { bytes: BASE64.decode(data)?, extension: extension_for(mime), usage: None });
       }
     }
   }
@@ -228,6 +231,14 @@ fn first_image(response: &Value) -> anyhow::Result<GeneratedFile> {
     (_, text) if !text.is_empty() => anyhow::bail!("The model returned no image: {text}"),
     _ => anyhow::bail!("The model returned no image"),
   }
+}
+
+/// The token counts in a reply's `usageMetadata`, for the spend meter.
+fn usage(response: &Value) -> Option<GeminiUsage> {
+  let meta = response.get("usageMetadata")?;
+  let count = |key: &str| meta.get(key).and_then(Value::as_u64).unwrap_or(0);
+  let image_tokens = meta.get("candidatesTokensDetails").and_then(Value::as_array).and_then(|details| details.iter().find(|d| d.get("modality").and_then(Value::as_str) == Some("IMAGE"))).and_then(|d| d.get("tokenCount")).and_then(Value::as_u64);
+  Some(GeminiUsage { prompt_tokens: count("promptTokenCount"), candidates_tokens: count("candidatesTokenCount"), thoughts_tokens: count("thoughtsTokenCount"), image_tokens })
 }
 
 fn extension_for(mime: &str) -> &'static str {
@@ -282,6 +293,13 @@ mod tests {
     assert_eq!((image.bytes, image.extension), (vec![1, 2, 3], "jpg"));
     let blocked = json!({ "candidates": [{ "finishReason": "IMAGE_SAFETY", "content": { "parts": [] } }] });
     assert!(first_image(&blocked).unwrap_err().to_string().contains("IMAGE_SAFETY"));
+  }
+
+  #[test]
+  fn usage_breaks_out_image_tokens() {
+    let response = json!({ "usageMetadata": { "promptTokenCount": 12, "candidatesTokenCount": 1130, "thoughtsTokenCount": 200, "candidatesTokensDetails": [{ "modality": "TEXT", "tokenCount": 10 }, { "modality": "IMAGE", "tokenCount": 1120 }] } });
+    assert_eq!(usage(&response), Some(GeminiUsage { prompt_tokens: 12, candidates_tokens: 1130, thoughts_tokens: 200, image_tokens: Some(1120) }));
+    assert_eq!(usage(&json!({})), None);
   }
 
   #[test]
