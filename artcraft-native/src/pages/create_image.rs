@@ -87,7 +87,7 @@ impl CreateImagePage {
     let deck = if max_images > 0 { DeckMode::References(DeckLimits { max_images, max_videos: 0, max_video_secs: None, max_audios: 0, max_audio_secs: None, library: env.signed_in }) } else { DeckMode::None };
     let accepts: &[RefKind] = if max_images > 0 { &[RefKind::Image] } else { &[] };
     let prompt_max = model.map_or(Some(DEFAULT_PROMPT_MAX), |m| m.prompt_max);
-    let props = PromptBoxProps { id: Id::new("image-prompt-box"), placeholder: PLACEHOLDER, enter_to_generate: env.enter_to_generate, mentions: &[], max_length: Some(prompt_max), deck, accepts, credits: self.cost.credits, generate_enabled: !self.settings.prompt.trim().is_empty() && model.is_some(), generating: self.generating, generate_tooltip: "Generate", warning: None, banner: None, extra_input: false };
+    let props = PromptBoxProps { id: Id::new("image-prompt-box"), placeholder: PLACEHOLDER, enter_to_generate: env.enter_to_generate, mentions: &[], max_length: Some(prompt_max), deck, accepts, credits: self.cost.credits, usd: self.cost.usd.as_ref(), generate_enabled: !self.settings.prompt.trim().is_empty() && model.is_some(), generating: self.generating, generate_tooltip: "Generate", warning: None, banner: None, extra_input: false };
     let models = &env.catalog.image_page;
     let settings = &mut self.settings;
     let count = settings.count;

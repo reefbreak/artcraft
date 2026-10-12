@@ -203,9 +203,9 @@ impl ArtcraftApp {
         }
         self.models_retry_at = Some(ctx.input(|i| i.time) + MODEL_RETRY_INTERVAL);
       },
-      Event::Cost { key, credits } => {
+      Event::Cost { key, credits, usd } => {
         for cost in [&mut self.image.cost, &mut self.video.cost, &mut self.audio.cost] {
-          cost.apply(&key, credits);
+          cost.apply(&key, credits, usd.clone());
         }
       },
       Event::Enqueued { modality, job_tokens, meta } => {

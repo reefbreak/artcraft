@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use egui::{Align2, Color32, FontId, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
 
+use crate::backend::local::estimate::CostEstimate;
 use crate::backend::media_cache::MediaCache;
 use crate::theme;
 use crate::ui::icons::{self, Icon};
@@ -50,6 +51,8 @@ pub struct PromptBoxProps<'a> {
   pub accepts: &'a [RefKind],
   /// The cost of generating, when known.
   pub credits: Option<u64>,
+  /// Local mode: what generating would cost on the user's own accounts.
+  pub usd: Option<&'a CostEstimate>,
   pub generate_enabled: bool,
   pub generating: bool,
   /// Shown on the generate button.
@@ -176,6 +179,14 @@ fn deck_widget(ui: &mut Ui, props: &PromptBoxProps<'_>, refs: &References, cache
 fn generate_cluster(ui: &mut Ui, props: &PromptBoxProps<'_>, actions: &mut Vec<PromptBoxAction>) {
   if widgets::generate_button(ui, props.generate_enabled && !props.generating, props.generating, props.generate_tooltip).clicked() {
     actions.push(PromptBoxAction::Generate);
+  }
+  if let Some(estimate) = props.usd {
+    let ink = theme::fade(theme::INK, if props.generate_enabled { 0.8 } else { 0.4 });
+    let galley = ui.painter().layout_no_wrap(estimate.label(), FontId::new(13.0, theme::semibold()), ink);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 22.0, 36.0), Sense::hover());
+    icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.left() + 7.0, rect.center().y), vec2(14.0, 14.0)), Icon::Coins, ink);
+    ui.painter().galley(pos2(rect.left() + 20.0, rect.center().y - galley.size().y / 2.0), galley, ink);
+    resp.on_hover_text(estimate.details());
   }
   if let Some(credits) = props.credits {
     let ink = theme::fade(theme::INK, if props.generate_enabled { 0.8 } else { 0.4 });

@@ -110,6 +110,8 @@ pub enum Event {
   Cost {
     key: String,
     credits: Option<u64>,
+    /// Local mode: the cost in dollars on the user's own accounts.
+    usd: Option<local::estimate::CostEstimate>,
   },
   Enqueued {
     modality: Modality,
@@ -442,9 +444,9 @@ impl Backend {
 
   /// Asks what a request would cost (`POST /v1/omni_gen/cost/{modality}`).
   pub fn estimate_cost(&self, modality: Modality, key: String, fields: Map<String, Value>) {
-    // Local generations bill the user's own cloud accounts: no ArtCraft credits.
-    if self.local.is_some() {
-      let _ = self.tx.send(Event::Cost { key, credits: None });
+    // Local generations bill the user's own cloud accounts: dollars, not ArtCraft credits.
+    if let Some(local) = &self.local {
+      let _ = self.tx.send(Event::Cost { key, credits: None, usd: local.estimate(modality, &fields) });
       return;
     }
     let api = self.api();
@@ -457,7 +459,7 @@ impl Backend {
           None
         },
       };
-      let _ = tx.send(Event::Cost { key, credits });
+      let _ = tx.send(Event::Cost { key, credits, usd: None });
     });
   }
 
@@ -528,7 +530,7 @@ impl Backend {
     match provider {
       Provider::Artcraft => self.estimate_cost(Modality::Image, key, fields),
       Provider::Midjourney => {
-        let _ = self.tx.send(Event::Cost { key, credits: Some(0) });
+        let _ = self.tx.send(Event::Cost { key, credits: Some(0), usd: None });
       },
       Provider::Fal => {
         let api = self.api();
@@ -540,7 +542,7 @@ impl Backend {
               None
             },
           };
-          let _ = tx.send(Event::Cost { key, credits });
+          let _ = tx.send(Event::Cost { key, credits, usd: None });
         });
       },
     }

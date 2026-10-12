@@ -122,10 +122,7 @@ pub async fn decide(config: &LocalConfig, jev: Option<&JevClient>, modality: Mod
     let model = catalog::find(config, &request.model_id).ok_or_else(|| anyhow::anyhow!("{} isn't available with your configured accounts", request.model_id))?;
     return Ok(Decision { candidates: vec![model.info.name.clone()], model, decided_by: DecidedBy::User, jev: None, ruled_out: Vec::new() });
   }
-  let candidates = match modality {
-    Modality::Video => catalog::video_candidates(config),
-    _ => catalog::image_candidates(config),
-  };
+  let candidates = all_candidates(config, modality);
   let ruled_out: Vec<(String, &'static str)> = candidates.iter().filter_map(|m| misfit(&m.info, request).map(|why| (m.info.name.clone(), why))).collect();
   let fitting: Vec<LocalModel> = candidates.into_iter().filter(|m| fits(&m.info, request)).collect();
   let Some(fallback) = rule_pick(&fitting, request) else {
@@ -156,6 +153,25 @@ pub async fn decide(config: &LocalConfig, jev: Option<&JevClient>, modality: Mod
       warn!("Jev routing failed, using rules: {err}");
       Ok(decision(fallback, DecidedBy::RulesJevUnavailable, None))
     },
+  }
+}
+
+/// What a request could run on and what the rules would pick, without asking Jev: for the cost
+/// estimate shown before generating. `None` when nothing fits.
+pub fn plan(config: &LocalConfig, modality: Modality, request: &Request) -> Option<(Vec<LocalModel>, LocalModel)> {
+  if !matches!(request.model_id.as_str(), catalog::AUTO_IMAGE | catalog::AUTO_VIDEO) {
+    let model = catalog::find(config, &request.model_id)?;
+    return Some((vec![model.clone()], model));
+  }
+  let fitting: Vec<LocalModel> = all_candidates(config, modality).into_iter().filter(|m| fits(&m.info, request)).collect();
+  let pick = rule_pick(&fitting, request)?;
+  Some((fitting, pick))
+}
+
+fn all_candidates(config: &LocalConfig, modality: Modality) -> Vec<LocalModel> {
+  match modality {
+    Modality::Video => catalog::video_candidates(config),
+    _ => catalog::image_candidates(config),
   }
 }
 

@@ -1,6 +1,7 @@
 //! What the create pages share: the page shell (`DesktopCreatePageShell`), uploading references,
 //! cost-estimate bookkeeping and the app-level requests pages make.
 
+use crate::backend::local::estimate::CostEstimate;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -361,6 +362,8 @@ pub struct CostState {
   /// The request the estimate below is for.
   key: String,
   pub credits: Option<u64>,
+  /// Local mode: the dollar estimate on the user's own accounts.
+  pub usd: Option<CostEstimate>,
   pending_key: Option<(String, f64)>,
 }
 
@@ -382,6 +385,7 @@ impl CostState {
         if now - since >= COST_DEBOUNCE_SECS {
           self.key = key.clone();
           self.credits = None;
+          self.usd = None;
           self.pending_key = None;
           request(key, fields.clone());
         } else {
@@ -396,9 +400,10 @@ impl CostState {
   }
 
   /// Takes an estimate that arrived for `key`.
-  pub fn apply(&mut self, key: &str, credits: Option<u64>) {
+  pub fn apply(&mut self, key: &str, credits: Option<u64>, usd: Option<CostEstimate>) {
     if key == self.key {
       self.credits = credits;
+      self.usd = usd;
     }
   }
 }

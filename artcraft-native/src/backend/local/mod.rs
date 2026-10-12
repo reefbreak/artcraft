@@ -8,6 +8,7 @@
 pub mod bedrock;
 pub mod catalog;
 pub mod config;
+pub mod estimate;
 pub mod jev;
 pub mod library;
 pub mod pricing;
@@ -30,6 +31,7 @@ use crate::models::ModelInfo;
 use bedrock::{BedrockClient, StabilityRequest};
 use catalog::Route;
 use config::LocalConfig;
+use estimate::{CostEstimate, VEO_HD_SECONDS};
 use jev::JevClient;
 use library::{GenerationRecord, JevRecord, LocalLibrary, MediaClass, NewFile, Origin};
 use pricing::{GeminiUsage, PriceBook};
@@ -41,8 +43,6 @@ pub const LOCAL_USERNAME: &str = "local";
 const JOB_PREFIX: &str = "job_local_";
 /// Finished jobs stay listed this long, so the feed sees them complete.
 const FINISHED_JOB_TTL_SECS: i64 = 10 * 60;
-/// Veo's only clip length at 1080p and 4K.
-const VEO_HD_SECONDS: u16 = 8;
 /// Image types the providers accept as-is; others are converted to PNG on upload.
 const PROVIDER_IMAGE_TYPES: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
 /// Thumbnails in the feed are this wide (the media cache resizes; local files have one size).
@@ -116,6 +116,11 @@ impl LocalEngine {
   /// Today's, this month's and all-time spend on the user's accounts, from this app's calls.
   pub fn spend_summary(&self) -> SpendSummary {
     self.spend.summary()
+  }
+
+  /// What the page's request would cost, before it's sent (`fields` as for generating).
+  pub fn estimate(&self, modality: Modality, fields: &Map<String, Value>) -> Option<CostEstimate> {
+    estimate::estimate(&self.config, &self.prices, modality, &Request::from_fields(modality, fields))
   }
 
   /// Where the spend ledger is saved.
@@ -230,10 +235,7 @@ impl LocalEngine {
       Route::Veo { model: upstream } => {
         let resolution = resolution.and_then(catalog::video_resolution);
         // Veo makes 1080p and 4K only as 8-second clips.
-        let duration = match resolution {
-          Some("1080p" | "4k") => Some(VEO_HD_SECONDS),
-          _ => request.duration_seconds.filter(|d| model.info.duration_options.contains(d)).or(model.info.duration_default),
-        };
+        let duration = estimate::veo_duration(model, request, resolution);
         let files = self.vertex.generate_video(VeoRequest { model: upstream, prompt: &request.prompt, start_frame: start.as_ref(), end_frame: end.as_ref(), aspect_ratio: aspect, resolution, duration_seconds: duration, sample_count: request.batch_count, generate_audio: request.generate_audio }).await?;
         // Veo 3.x makes sound unless told not to.
         let audio = request.generate_audio.unwrap_or(true);

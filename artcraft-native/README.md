@@ -82,6 +82,11 @@ Veo by seconds of video, Stability per image, Jev by input tokens, all at Octobe
 (`src/backend/local/pricing.rs`). Override a rate in `local_providers.json` under `"prices"`, e.g.
 `{ "stability.sd3-5-large-v1:0": 0.065 }`. The ledger is `~/Artcraft/local/spend.json`.
 
+**Cost before you generate.** Beside the generate button, the prompt box shows what the request
+would cost at list prices: one figure for a chosen model, or for Auto the range across the models
+that fit (hover for each model's price and the rules' likely pick). It updates as you change the
+model, size, count, duration or audio, and asks no API, so it costs nothing.
+
 **Routing panel.** The lightbox's side column shows how each local generation was made: what was
 requested, who decided (Jev with its confidence, the rules, or you), the model and API model that
 ran, Jev's odds for every option against the confidence bar, which models were ruled out and why,
