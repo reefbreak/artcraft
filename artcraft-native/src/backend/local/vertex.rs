@@ -51,8 +51,6 @@ pub struct OmniEditRequest<'a> {
   pub clip: &'a [u8],
   /// `360p`, `720p`, `1080p`, `4k`.
   pub resolution: &'a str,
-  /// `16:9` or `9:16`.
-  pub aspect_ratio: &'a str,
   /// Results go to `gs://…` and are downloaded, for clips too big to return inline.
   pub output_gcs_uri: Option<&'a str>,
 }
@@ -166,7 +164,20 @@ impl VertexClient {
     let base = format!("{}v1beta1/projects/{project}/locations/{OMNI_LOCATION}/interactions", self.host(OMNI_LOCATION));
     let mut last_error = None;
     for model in request.models {
-      match self.post_with_token(&base, &omni_body(model, &request), IMAGE_TIMEOUT).await {
+      let mut body = omni_body(model, &request);
+      let mut sent = self.post_with_token(&base, &body, IMAGE_TIMEOUT).await;
+      // Vertex refuses some output settings for edits; drop the one it names and send again.
+      while let Err(err) = &sent {
+        let Some(field) = refused_format_field(err, &body) else {
+          break;
+        };
+        warn!("Omni Flash won't take `{field}` for an edit; sending without it");
+        if let Some(format) = body.get_mut("response_format").and_then(Value::as_object_mut) {
+          format.remove(field);
+        }
+        sent = self.post_with_token(&base, &body, IMAGE_TIMEOUT).await;
+      }
+      match sent {
         Ok(started) => {
           let id = started.get("id").and_then(Value::as_str).map(str::to_owned);
           let result = async {
@@ -298,7 +309,8 @@ fn gemini_image_body(request: &GeminiImageRequest<'_>) -> Value {
 
 /// The Interactions API request for an Omni Flash edit.
 fn omni_body(model: &str, request: &OmniEditRequest<'_>) -> Value {
-  let mut format = json!({ "type": "video", "resolution": request.resolution, "aspect_ratio": request.aspect_ratio, "delivery": "inline" });
+  // No aspect ratio: an edit keeps the clip's ("cannot be set in response format for edit task").
+  let mut format = json!({ "type": "video", "resolution": request.resolution, "delivery": "inline" });
   if let Some(uri) = request.output_gcs_uri {
     format["delivery"] = json!("uri");
     format["gcs_uri"] = json!(uri);
@@ -353,6 +365,17 @@ fn omni_usage(interaction: &Value) -> Option<OmniUsage> {
 fn interaction_error(interaction: &Value) -> Option<String> {
   let message = |e: &Value| e.get("message").and_then(Value::as_str).map(str::to_owned);
   interaction.get("error").and_then(message).or_else(|| interaction.get("errors").and_then(Value::as_array).and_then(|a| a.iter().find_map(message))).or_else(|| interaction.get("steps").and_then(Value::as_array).and_then(|s| s.iter().find_map(|s| s.get("error").and_then(message))))
+}
+
+/// The `response_format` field a "… cannot be set in response format" error names, when the body
+/// still has it.
+fn refused_format_field(err: &anyhow::Error, body: &Value) -> Option<&'static str> {
+  let text = err.to_string().to_ascii_lowercase();
+  if !text.contains("cannot be set in response format") {
+    return None;
+  }
+  let format = body.get("response_format")?;
+  [("aspect ratio", "aspect_ratio"), ("aspect_ratio", "aspect_ratio"), ("resolution", "resolution"), ("duration", "duration")].into_iter().find(|(words, key)| text.contains(words) && format.get(*key).is_some()).map(|(_, key)| key)
 }
 
 /// Whether Vertex said the model (or endpoint) doesn't exist.
@@ -504,12 +527,16 @@ mod tests {
 
   #[test]
   fn omni_requests_send_the_clip_and_ask_for_an_edit() {
-    let request = OmniEditRequest { models: &OMNI_MODELS, prompt: "remove the tail", clip: &[1, 2, 3], resolution: "720p", aspect_ratio: "16:9", output_gcs_uri: None };
+    let request = OmniEditRequest { models: &OMNI_MODELS, prompt: "remove the tail", clip: &[1, 2, 3], resolution: "720p", output_gcs_uri: None };
     let body = omni_body("gemini-omni-1.1-flash-preview", &request);
     assert_eq!(body["input"][0], json!({ "type": "video", "mime_type": "video/mp4", "data": "AQID" }));
     assert_eq!(body["input"][1]["text"], "remove the tail");
     assert_eq!(body["generation_config"]["video_config"]["task"], "edit");
     assert_eq!(body["response_format"]["delivery"], "inline");
+    assert!(body["response_format"].get("aspect_ratio").is_none(), "edits keep the clip's shape");
+    let refused = anyhow::anyhow!("Vertex AI error 400 Bad Request: Resolution cannot be set in response format for edit task.");
+    assert_eq!(refused_format_field(&refused, &body), Some("resolution"));
+    assert_eq!(refused_format_field(&anyhow::anyhow!("Vertex AI error 400: quota"), &body), None);
     assert_eq!((body["background"].clone(), body["store"].clone()), (json!(true), json!(true)), "Vertex polls only stored background interactions");
     let to_gcs = omni_body("m", &OmniEditRequest { output_gcs_uri: Some("gs://b/out/"), ..request });
     assert_eq!((to_gcs["response_format"]["delivery"].clone(), to_gcs["response_format"]["gcs_uri"].clone()), (json!("uri"), json!("gs://b/out/")));

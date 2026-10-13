@@ -405,12 +405,11 @@ impl LocalEngine {
           None => vertex::OMNI_MODELS.to_vec(),
         };
         let (prompt, models, resolution) = (&prompt, &models, resolution.as_str());
-        let aspect_ratio = prepared.aspect_ratio;
         let output_gcs_uri = self.config.omni_output_gcs_uri.as_deref();
         // Up to three parts at a time; results keep the clip's order.
         let mut edits: Vec<anyhow::Result<(vertex::OmniEdit, f64)>> = Vec::new();
         for chunk in prepared.parts.chunks(3) {
-          let calls: Vec<_> = chunk.iter().map(|(start, length, clip)| self.omni_part(vertex::OmniEditRequest { models, prompt, clip, resolution, aspect_ratio, output_gcs_uri }, *start, *length, count > 1)).collect();
+          let calls: Vec<_> = chunk.iter().map(|(start, length, clip)| self.omni_part(vertex::OmniEditRequest { models, prompt, clip, resolution, output_gcs_uri }, *start, *length, count > 1)).collect();
           edits.extend(join_all(calls).await);
         }
         let mut cost = 0.0;

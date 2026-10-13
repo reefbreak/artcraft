@@ -285,17 +285,15 @@ pub fn omni_parts(duration: f64) -> Vec<(f64, f64)> {
   (0..count).map(|i| (i as f64 * length, length)).collect()
 }
 
-/// A clip ready for Omni Flash: its parts as H.264 MP4s (at most 1920 px on the long side), and
-/// whether it's landscape (`16:9`) or portrait (`9:16`).
+/// A clip ready for Omni Flash: its parts as H.264 MP4s (at most 1920 px on the long side).
 pub struct OmniSource {
   pub parts: Vec<(f64, f64, Vec<u8>)>,
-  pub aspect_ratio: &'static str,
   pub duration: f64,
 }
 
 pub fn prepare_for_omni(video: &Path) -> anyhow::Result<OmniSource> {
   anyhow::ensure!(video::ffmpeg_available(), "Describe edits need FFmpeg: install it with `brew install ffmpeg`.");
-  let (w, h, _, duration) = video::probe_file(video).map_err(|e| anyhow::anyhow!("Couldn't read the clip: {e}"))?;
+  let (_, _, _, duration) = video::probe_file(video).map_err(|e| anyhow::anyhow!("Couldn't read the clip: {e}"))?;
   anyhow::ensure!(duration > 0.2, "That clip is too short to edit");
   anyhow::ensure!(duration <= OMNI_LONGEST_CLIP + 0.5, "Describe edits take clips up to {OMNI_LONGEST_CLIP:.0} seconds; trim this one first (Trim tab)");
   let dir = tempfile::tempdir()?;
@@ -306,7 +304,7 @@ pub fn prepare_for_omni(video: &Path) -> anyhow::Result<OmniSource> {
     run_ffmpeg(&["-y", "-loglevel", "error", "-ss", &format!("{start:.3}"), "-i"], video, &["-t", &format!("{length:.3}"), "-vf", scale, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart"], &out)?;
     parts.push((start, length, std::fs::read(&out)?));
   }
-  Ok(OmniSource { parts, aspect_ratio: if h > w { "9:16" } else { "16:9" }, duration })
+  Ok(OmniSource { parts, duration })
 }
 
 /// The prompt sent to Omni Flash: the user's words, plus Google's "keep everything else".
@@ -470,7 +468,6 @@ mod tests {
     let status = video::command("ffmpeg").args(["-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=s=640x360:d=13:r=30", "-f", "lavfi", "-i", "sine=duration=13", "-shortest", "-pix_fmt", "yuv420p"]).arg(&source).status().unwrap();
     assert!(status.success());
     let prepared = prepare_for_omni(&source).unwrap();
-    assert_eq!(prepared.aspect_ratio, "16:9");
     assert_eq!(prepared.parts.len(), 2);
     // Stand-ins for Omni's edits: silent copies of each part.
     let edited: Vec<Vec<u8>> = prepared
