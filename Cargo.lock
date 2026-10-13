@@ -486,52 +486,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "artcraft_native"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "artcraft_api_defs",
- "artcraft_client",
- "artcraft_router",
- "aws-config",
- "aws-sdk-bedrockruntime",
- "base64 0.22.1",
- "chrono",
- "cookie",
- "cookie_store_wrapper",
- "directories",
- "eframe",
- "egui",
- "egui_extras",
- "egui_kittest",
- "enums",
- "env_logger",
- "fal_client",
- "futures",
- "gcp_auth",
- "glam",
- "gltf",
- "image",
- "log",
- "midjourney_client",
- "open",
- "reqwest 0.12.23",
- "resvg",
- "rfd",
- "rodio",
- "serde",
- "serde_json",
- "tempfile",
- "tokens",
- "tokio",
- "tract-onnx",
- "url",
- "uuid 1.22.0",
- "wry",
-]
-
-[[package]]
 name = "artcraft_router"
 version = "0.0.1"
 dependencies = [
@@ -3872,6 +3826,52 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
+]
+
+[[package]]
+name = "gesso"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "artcraft_api_defs",
+ "artcraft_client",
+ "artcraft_router",
+ "aws-config",
+ "aws-sdk-bedrockruntime",
+ "base64 0.22.1",
+ "chrono",
+ "cookie",
+ "cookie_store_wrapper",
+ "directories",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "egui_kittest",
+ "enums",
+ "env_logger",
+ "fal_client",
+ "futures",
+ "gcp_auth",
+ "glam",
+ "gltf",
+ "image",
+ "log",
+ "midjourney_client",
+ "open",
+ "reqwest 0.12.23",
+ "resvg",
+ "rfd",
+ "rodio",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokens",
+ "tokio",
+ "tract-onnx",
+ "url",
+ "uuid 1.22.0",
+ "wry",
 ]
 
 [[package]]

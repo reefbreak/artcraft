@@ -3,7 +3,7 @@ resolver = "2"
 
 # Desktop application and its local build/test dependencies.
 members = [
-  "artcraft-native", # Pure Rust (egui) desktop app; no Tauri or webview
+  "gesso", # Gesso: the pure-Rust (egui) desktop app
   "crates/api_clients/artcraft/artcraft_api_defs",
   "crates/api_clients/artcraft/artcraft_client",
   "crates/api_clients/artcraft/artcraft_router",
@@ -43,7 +43,7 @@ members = [
   "crates/testing/test_utils",
   "crates/vendor/tauri-plugin-http",
 ]
-default-members = ["crates/desktop/artcraft"]
+default-members = ["gesso"]
 
 [workspace.package]
 publish = false

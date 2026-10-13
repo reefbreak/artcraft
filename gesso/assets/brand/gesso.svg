@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Gesso: a dark canvas primed with one broad brush stroke of white ground. Original artwork for Gesso. -->
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="#17191d"/>
+  <path d="M96 318 C 150 250, 250 180, 380 128 C 404 119, 424 128, 418 148
+           C 412 170, 392 186, 366 202 C 300 244, 230 300, 170 360
+           C 150 380, 126 392, 106 384 C 86 376, 82 340, 96 318 Z" fill="#f2ede3"/>
+  <g stroke="#17191d" stroke-linecap="round" fill="none">
+    <path d="M128 352 C 200 292, 280 230, 392 160" stroke-width="5" opacity="0.30"/>
+    <path d="M112 330 C 170 276, 250 214, 360 156" stroke-width="3" opacity="0.22"/>
+    <path d="M150 366 C 220 306, 290 250, 380 192" stroke-width="3" opacity="0.18"/>
+  </g>
+  <circle cx="392" cy="378" r="24" fill="#e8b04a"/>
+</svg>
