@@ -108,7 +108,7 @@ has "Open in" buttons for them.
 FFmpeg (`brew install ffmpeg`) is needed for video previews, Frame Extract and Edit Video. 3D Object
 and 3D World still say "coming soon": they need a 3D generation provider.
 
-Not in local mode yet: audio models, characters, cost estimates, and Bedrock video (Amazon Nova
+Not in local mode yet: characters, and Bedrock video (Amazon Nova
 Reel was retired on 2026-09-30; Luma Ray2 needs an S3 bucket). The code is in
 `src/backend/local/`.
 
