@@ -117,15 +117,15 @@ Reel was retired on 2026-09-30; Luma Ray2 needs an S3 bucket). The code is in
 In local mode the lightbox has a **Craft apps** row: send the item to another app in the
 [craft-suite](https://github.com/reefbreak/craft-suite).
 
-| App         | Takes                | What happens                                       |
-|-------------|----------------------|----------------------------------------------------|
-| FilmCraft   | image, video, audio  | imported into the open project (`file.import`)     |
-| EffectCraft | image, video, audio  | imported into the open project (`file.import`)     |
-| PhotoCraft  | image                | opened as a document (`app.open`)                  |
-| LightCraft  | image                | added to the catalog (`library.import`)            |
-| VectorCraft | image                | placed in the open document (`file.place`)         |
-| DesignCraft | image                | placed in the open layout (`file.place`)           |
-| PrintCraft  | image                | a PDF made from the image (`pdfcraft --create-images`) |
+| App         | Takes               | What happens                                           |
+|-------------|---------------------|--------------------------------------------------------|
+| FilmCraft   | image, video, audio | imported into the open project (`file.import`)         |
+| EffectCraft | image, video, audio | imported into the open project (`file.import`)         |
+| PhotoCraft  | image               | opened as a document (`app.open`)                      |
+| LightCraft  | image               | added to the catalog (`library.import`)                |
+| VectorCraft | image               | placed in the open document (`file.place`)             |
+| DesignCraft | image               | placed in the open layout (`file.place`)               |
+| PrintCraft  | image               | a PDF made from the image (`pdfcraft --create-images`) |
 
 If the app is running from an earlier hand-off, the file goes over its control channel
 (127.0.0.1, ports 47861–47866). Otherwise ArtCraft starts it with the file and that port.
