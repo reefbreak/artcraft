@@ -35,6 +35,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(400);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Unfinished files in the inbox.
 const PARTIAL_SUFFIXES: [&str; 3] = ["part", "tmp", "crdownload"];
+/// How long a just-started app gets to open its control port.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
+const STARTUP_POLL: Duration = Duration::from_millis(500);
 
 /// An app ArtCraft can hand files to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -45,6 +48,8 @@ pub enum SuiteApp {
   LightCraft,
   VectorCraft,
   DesignCraft,
+  DeckCraft,
+  GridCraft,
   PrintCraft,
 }
 
@@ -59,7 +64,17 @@ pub struct SuiteLocator {
 }
 
 impl SuiteApp {
-  pub const ALL: [SuiteApp; 7] = [SuiteApp::FilmCraft, SuiteApp::EffectCraft, SuiteApp::PhotoCraft, SuiteApp::LightCraft, SuiteApp::VectorCraft, SuiteApp::DesignCraft, SuiteApp::PrintCraft];
+  pub const ALL: [SuiteApp; 9] = [
+    SuiteApp::FilmCraft,
+    SuiteApp::EffectCraft,
+    SuiteApp::PhotoCraft,
+    SuiteApp::LightCraft,
+    SuiteApp::VectorCraft,
+    SuiteApp::DesignCraft,
+    SuiteApp::DeckCraft,
+    SuiteApp::GridCraft,
+    SuiteApp::PrintCraft,
+  ];
 
   /// The apps that take a file of this class, most useful first.
   pub fn for_class(class: MediaClass) -> Vec<SuiteApp> {
@@ -74,6 +89,8 @@ impl SuiteApp {
       SuiteApp::LightCraft => "LightCraft",
       SuiteApp::VectorCraft => "VectorCraft",
       SuiteApp::DesignCraft => "DesignCraft",
+      SuiteApp::DeckCraft => "DeckCraft",
+      SuiteApp::GridCraft => "GridCraft",
       SuiteApp::PrintCraft => "PrintCraft",
     }
   }
@@ -87,6 +104,8 @@ impl SuiteApp {
       SuiteApp::LightCraft => "Add to LightCraft's catalog to grade and organise",
       SuiteApp::VectorCraft => "Place in VectorCraft (trace, or build a layout around it)",
       SuiteApp::DesignCraft => "Place in a DesignCraft page layout",
+      SuiteApp::DeckCraft => "Insert on the current slide in DeckCraft",
+      SuiteApp::GridCraft => "Insert as a picture in the open GridCraft workbook",
       SuiteApp::PrintCraft => "Make a PDF from the image in PrintCraft",
     }
   }
@@ -107,6 +126,8 @@ impl SuiteApp {
       SuiteApp::LightCraft => "lightcraft",
       SuiteApp::VectorCraft => "vectorcraft",
       SuiteApp::DesignCraft => "designcraft",
+      SuiteApp::DeckCraft => "deckcraft",
+      SuiteApp::GridCraft => "gridcraft",
       SuiteApp::PrintCraft => "pdfcraft",
     }
   }
@@ -138,8 +159,17 @@ impl SuiteApp {
       SuiteApp::LightCraft => Some(47_864),
       SuiteApp::VectorCraft => Some(47_865),
       SuiteApp::DesignCraft => Some(47_866),
+      SuiteApp::DeckCraft => Some(47_867),
+      SuiteApp::GridCraft => Some(47_868),
       SuiteApp::PrintCraft => None,
     }
+  }
+
+  /// Whether the app opens the files named on its command line. DeckCraft and GridCraft open
+  /// presentations and workbooks that way, not images, so they are started empty and sent the
+  /// picture once their control port is up.
+  fn opens_files_on_launch(self) -> bool {
+    !matches!(self, SuiteApp::DeckCraft | SuiteApp::GridCraft)
   }
 }
 
@@ -211,7 +241,12 @@ pub fn open_in(app: SuiteApp, files: &[PathBuf], locator: &SuiteLocator, data_ro
   let args = launch_args(app, &files, &token_file);
   info!("Starting {} {:?}", binary.display(), args);
   Command::new(&binary).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("Couldn't start {}: {e}", app.name()))?;
-  Ok(format!("Opening in {}\u{2026}", app.name()))
+  if app.opens_files_on_launch() {
+    return Ok(format!("Opening in {}\u{2026}", app.name()));
+  }
+  let port = app.port().unwrap_or_default();
+  let stream = wait_for(port, STARTUP_TIMEOUT).ok_or_else(|| format!("{} started but didn't open its control port. Try again once it's up.", app.name()))?;
+  send(app, stream, &files, &token_file).map(|()| format!("Sent to {}", app.name()))
 }
 
 /// The command line that starts the app with the files open and its control channel on.
@@ -231,7 +266,9 @@ fn launch_args(app: SuiteApp, files: &[PathBuf], token_file: &Path) -> Vec<OsStr
     SuiteApp::PrintCraft => args.push("--create-images".into()),
     _ => {},
   }
-  args.extend(files.iter().map(|f| f.as_os_str().to_owned()));
+  if app.opens_files_on_launch() {
+    args.extend(files.iter().map(|f| f.as_os_str().to_owned()));
+  }
   args
 }
 
@@ -246,6 +283,8 @@ fn requests(app: SuiteApp, files: &[PathBuf]) -> Vec<Vec<Value>> {
     // Relative to the read root (the media folder).
     SuiteApp::PhotoCraft => files.iter().map(|f| vec![json!({"method": "app.open", "params": {"path": f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()}})]).collect(),
     SuiteApp::VectorCraft | SuiteApp::DesignCraft => paths.iter().map(|p| vec![execute("file.place", json!({"path": p})), json!({"method": "app.open", "params": {"path": p}})]).collect(),
+    // A picture each, on the current slide / at the selected cell.
+    SuiteApp::DeckCraft | SuiteApp::GridCraft => paths.iter().map(|p| vec![execute("insert.picture", json!({"path": p}))]).collect(),
     SuiteApp::PrintCraft => Vec::new(),
   }
 }
@@ -255,6 +294,20 @@ fn connect(port: u16) -> Option<TcpStream> {
   stream.set_read_timeout(Some(REPLY_TIMEOUT)).ok()?;
   stream.set_write_timeout(Some(REPLY_TIMEOUT)).ok()?;
   Some(stream)
+}
+
+/// Connects to a just-started app, retrying until its control port opens.
+fn wait_for(port: u16, timeout: Duration) -> Option<TcpStream> {
+  let deadline = std::time::Instant::now() + timeout;
+  loop {
+    if let Some(stream) = connect(port) {
+      return Some(stream);
+    }
+    if std::time::Instant::now() >= deadline {
+      return None;
+    }
+    std::thread::sleep(STARTUP_POLL);
+  }
 }
 
 fn send(app: SuiteApp, stream: TcpStream, files: &[PathBuf], token_file: &Path) -> Result<(), String> {
@@ -361,7 +414,7 @@ mod tests {
   fn apps_match_media_classes() {
     assert_eq!(SuiteApp::for_class(MediaClass::Video), vec![SuiteApp::FilmCraft, SuiteApp::EffectCraft]);
     assert_eq!(SuiteApp::for_class(MediaClass::Audio), vec![SuiteApp::FilmCraft, SuiteApp::EffectCraft]);
-    assert_eq!(SuiteApp::for_class(MediaClass::Image).len(), 7);
+    assert_eq!(SuiteApp::for_class(MediaClass::Image).len(), 9);
   }
 
   #[test]
@@ -378,6 +431,18 @@ mod tests {
   fn printcraft_makes_a_pdf_from_the_images() {
     let args = launch_args(SuiteApp::PrintCraft, &[PathBuf::from("/m/a.png")], Path::new("/t"));
     assert_eq!(args, [OsString::from("--create-images"), OsString::from("/m/a.png")]);
+  }
+
+  #[test]
+  fn deckcraft_and_gridcraft_start_empty_and_get_the_picture_over_the_channel() {
+    let file = PathBuf::from("/m/a.png");
+    for app in [SuiteApp::DeckCraft, SuiteApp::GridCraft] {
+      let args = launch_args(app, std::slice::from_ref(&file), Path::new("/t"));
+      assert_eq!(args, [OsString::from("--control"), OsString::from(app.port().unwrap().to_string())], "{app:?}");
+      let insert = &requests(app, std::slice::from_ref(&file))[0][0];
+      assert_eq!(insert["params"]["command"], "insert.picture");
+      assert_eq!(insert["params"]["params"]["path"], "/m/a.png");
+    }
   }
 
   #[test]

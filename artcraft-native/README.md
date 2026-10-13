@@ -96,14 +96,14 @@ the cost and how long it took.
 cost, and a strip of results that also land in the library; any local image or video in the lightbox
 has "Open in" buttons for them.
 
-| Page          | What it does                                                     | Runs on                     |
-|---------------|------------------------------------------------------------------|-----------------------------|
+| Page          | What it does                                                               | Runs on                                   |
+|---------------|----------------------------------------------------------------------------|-------------------------------------------|
 | Edit Image    | Describe a change (optional painted mask); inpaint, erase, replace, expand | Vertex (Nano Banana); Bedrock (Stability) |
-| BG Remove     | Transparent cut-out                                              | Your Mac (ISNet), or Bedrock |
-| Frame Extract | Marked moments or one frame every N seconds                      | Your Mac (FFmpeg)           |
-| Edit Video    | Trim, join, extend about 7 s                                     | Your Mac (FFmpeg); Vertex (Veo) |
-| 3D Stage      | Block a shot with people, shapes and imported GLB/OBJ, then paint it | Your Mac; Vertex for Generate |
-| Audio         | 30-second instrumental clips                                     | Vertex (Lyria 2)            |
+| BG Remove     | Transparent cut-out                                                        | Your Mac (ISNet), or Bedrock              |
+| Frame Extract | Marked moments or one frame every N seconds                                | Your Mac (FFmpeg)                         |
+| Edit Video    | Trim, join, extend about 7 s                                               | Your Mac (FFmpeg); Vertex (Veo)           |
+| 3D Stage      | Block a shot with people, shapes and imported GLB/OBJ, then paint it       | Your Mac; Vertex for Generate             |
+| Audio         | 30-second instrumental clips                                               | Vertex (Lyria 2)                          |
 
 FFmpeg (`brew install ffmpeg`) is needed for video previews, Frame Extract and Edit Video. 3D Object
 and 3D World still say "coming soon": they need a 3D generation provider.
@@ -117,18 +117,22 @@ Reel was retired on 2026-09-30; Luma Ray2 needs an S3 bucket). The code is in
 In local mode the lightbox has a **Craft apps** row: send the item to another app in the
 [craft-suite](https://github.com/reefbreak/craft-suite).
 
-| App         | Takes               | What happens                                           |
-|-------------|---------------------|--------------------------------------------------------|
-| FilmCraft   | image, video, audio | imported into the open project (`file.import`)         |
-| EffectCraft | image, video, audio | imported into the open project (`file.import`)         |
-| PhotoCraft  | image               | opened as a document (`app.open`)                      |
-| LightCraft  | image               | added to the catalog (`library.import`)                |
-| VectorCraft | image               | placed in the open document (`file.place`)             |
-| DesignCraft | image               | placed in the open layout (`file.place`)               |
-| PrintCraft  | image               | a PDF made from the image (`pdfcraft --create-images`) |
+| App         | Takes               | What happens                                                  |
+|-------------|---------------------|---------------------------------------------------------------|
+| FilmCraft   | image, video, audio | imported into the open project (`file.import`)                |
+| EffectCraft | image, video, audio | imported into the open project (`file.import`)                |
+| PhotoCraft  | image               | opened as a document (`app.open`)                             |
+| LightCraft  | image               | added to the catalog (`library.import`)                       |
+| VectorCraft | image               | placed in the open document (`file.place`)                    |
+| DesignCraft | image               | placed in the open layout (`file.place`)                      |
+| DeckCraft   | image               | inserted on the current slide (`insert.picture`)              |
+| GridCraft   | image               | inserted as a picture in the open workbook (`insert.picture`) |
+| PrintCraft  | image               | a PDF made from the image (`pdfcraft --create-images`)        |
 
 If the app is running from an earlier hand-off, the file goes over its control channel
-(127.0.0.1, ports 47861–47866). Otherwise ArtCraft starts it with the file and that port.
+(127.0.0.1, ports 47861–47868). Otherwise ArtCraft starts it with the file and that port. DeckCraft and
+GridCraft don't open images from their command line, so ArtCraft starts them empty, waits for
+the port, and sends the picture.
 PhotoCraft and VectorCraft are started with the library's media folder as their read root, and
 PhotoCraft with a control token in `~/Artcraft/settings/photocraft_control.token`.
 
@@ -143,21 +147,21 @@ too. Hidden files and `.part` / `.tmp` files are skipped until they are renamed.
 
 ## Architecture
 
-| Module             | What it does                                                                   |
-|--------------------|--------------------------------------------------------------------------------|
-| `backend`          | Tokio runtime and every API call; results come back to the UI as `Event`s      |
-| `backend::wire`    | Lenient response shapes; new server enum values can't break decoding           |
-| `backend::session` | Credentials: own file, Tauri cookie import, env config                         |
-| `backend::media_cache` | Thumbnails and previews: downloaded and decoded off-thread, evicted when unused |
-| `backend::audio`   | One clip at a time: reference previews, feed tracks (pause, seek, volume), waveforms |
-| `backend::providers` | Midjourney and fal: accounts, submitting, and a worker that finishes jobs into the library |
-| `models`           | Model catalog from OmniGen listings, plus names, families and limits           |
-| `prompt_box`       | The shared prompt box: editor, reference deck, keyframes, pickers, model selector |
-| `pages`            | Create Image, Video and Audio, Home, Library, and the shared page shell        |
-| `feed`             | Generation feed: running, failed and finished jobs, library paging, grid and list |
-| `overlays`         | Lightbox, library picker, sign-in, settings, provider setup and the Midjourney sign-in window |
-| `shell`            | Custom title bar, sidebar flush to the window edge, content panel header       |
-| `theme`, `ui`      | Tokens, Lucide-style icons, widgets, toasts, window chrome (drag, resize, caption buttons) |
+| Module                 | What it does                                                                                  |
+|------------------------|-----------------------------------------------------------------------------------------------|
+| `backend`              | Tokio runtime and every API call; results come back to the UI as `Event`s                     |
+| `backend::wire`        | Lenient response shapes; new server enum values can't break decoding                          |
+| `backend::session`     | Credentials: own file, Tauri cookie import, env config                                        |
+| `backend::media_cache` | Thumbnails and previews: downloaded and decoded off-thread, evicted when unused               |
+| `backend::audio`       | One clip at a time: reference previews, feed tracks (pause, seek, volume), waveforms          |
+| `backend::providers`   | Midjourney and fal: accounts, submitting, and a worker that finishes jobs into the library    |
+| `models`               | Model catalog from OmniGen listings, plus names, families and limits                          |
+| `prompt_box`           | The shared prompt box: editor, reference deck, keyframes, pickers, model selector             |
+| `pages`                | Create Image, Video and Audio, Home, Library, and the shared page shell                       |
+| `feed`                 | Generation feed: running, failed and finished jobs, library paging, grid and list             |
+| `overlays`             | Lightbox, library picker, sign-in, settings, provider setup and the Midjourney sign-in window |
+| `shell`                | Custom title bar, sidebar flush to the window edge, content panel header                      |
+| `theme`, `ui`          | Tokens, Lucide-style icons, widgets, toasts, window chrome (drag, resize, caption buttons)    |
 
 How the backend works:
 
@@ -178,30 +182,30 @@ How the backend works:
 
 ## Prompt box parity
 
-| Feature                                                         | Status                                  |
-|-----------------------------------------------------------------|-----------------------------------------|
-| Auto-growing prompt (~4 lines), expand/collapse, resize grip    | Done                                    |
-| Focus mode (fullscreen editor with deck and toolbar)            | Done                                    |
-| Length counter, red over the model's limit                      | Done                                    |
-| Enter to generate (setting; Shift+Enter for a new line)         | Done                                    |
-| `@Image1` / `@Video1` / `@Audio1` highlight and autocomplete    | Done                                    |
-| Reference deck: fan, +N badge, hover-expand, reorder, clear all | Done                                    |
-| Keyframe slots: first/last frame, tilt, swap                    | Done                                    |
-| Upload, pick from library, drag & drop, paste image             | Done (video uploads must be MP4)        |
-| Model selector with families, logos, capability badges          | Done                                    |
-| Aspect ratio, resolution, quality, count                        | Done                                    |
-| Bitrate, output format, duration slider, sound, input mode      | Done                                    |
-| Live credit cost on the generate button                         | Done                                    |
-| Validation: starting frame, text-only banner, limits, uploads   | Done                                    |
-| Clear all (confirms when references are attached)               | Done                                    |
-| `@Character` mentions and the Characters modal (create/edit/delete) | Done                                |
-| Provider choice (Midjourney direct, fal), "Select Provider"     | Done (images; video runs on ArtCraft)   |
-| In-app video playback                                           | Done with FFmpeg on the PATH; otherwise opens in the system player |
-| Audio reference playback (click to play/stop)                   | Done                                    |
-| Animated video previews in the feed (with a stills toggle)      | Done                                    |
-| Audio: style, instrumental, keep lyrics, loop                   | Done                                    |
-| Audio: Beat & Key (BPM, musical key) and Tuning (sample rate, speed, volume, pitch) | Done                |
-| Audio references (play, 600 s cap) or one image, never both     | Done                                    |
+| Feature                                                                             | Status                                                             |
+|-------------------------------------------------------------------------------------|--------------------------------------------------------------------|
+| Auto-growing prompt (~4 lines), expand/collapse, resize grip                        | Done                                                               |
+| Focus mode (fullscreen editor with deck and toolbar)                                | Done                                                               |
+| Length counter, red over the model's limit                                          | Done                                                               |
+| Enter to generate (setting; Shift+Enter for a new line)                             | Done                                                               |
+| `@Image1` / `@Video1` / `@Audio1` highlight and autocomplete                        | Done                                                               |
+| Reference deck: fan, +N badge, hover-expand, reorder, clear all                     | Done                                                               |
+| Keyframe slots: first/last frame, tilt, swap                                        | Done                                                               |
+| Upload, pick from library, drag & drop, paste image                                 | Done (video uploads must be MP4)                                   |
+| Model selector with families, logos, capability badges                              | Done                                                               |
+| Aspect ratio, resolution, quality, count                                            | Done                                                               |
+| Bitrate, output format, duration slider, sound, input mode                          | Done                                                               |
+| Live credit cost on the generate button                                             | Done                                                               |
+| Validation: starting frame, text-only banner, limits, uploads                       | Done                                                               |
+| Clear all (confirms when references are attached)                                   | Done                                                               |
+| `@Character` mentions and the Characters modal (create/edit/delete)                 | Done                                                               |
+| Provider choice (Midjourney direct, fal), "Select Provider"                         | Done (images; video runs on ArtCraft)                              |
+| In-app video playback                                                               | Done with FFmpeg on the PATH; otherwise opens in the system player |
+| Audio reference playback (click to play/stop)                                       | Done                                                               |
+| Animated video previews in the feed (with a stills toggle)                          | Done                                                               |
+| Audio: style, instrumental, keep lyrics, loop                                       | Done                                                               |
+| Audio: Beat & Key (BPM, musical key) and Tuning (sample rate, speed, volume, pitch) | Done                                                               |
+| Audio references (play, 600 s cap) or one image, never both                         | Done                                                               |
 
 Feed and lightbox:
 
