@@ -28,6 +28,8 @@ pub const INBOX_DIRECTORY: &str = "inbox";
 const IMPORTED_DIRECTORY: &str = "imported";
 /// Where PhotoCraft's control token lives, under the data root.
 const PHOTOCRAFT_TOKEN_FILE: &str = "settings/photocraft_control.token";
+/// WordCraft writes its control key once its port is bound; how long to wait for the file.
+const WORDCRAFT_KEY_TIMEOUT: Duration = Duration::from_secs(5);
 /// A file younger than this may still be being written.
 const INBOX_SETTLE: Duration = Duration::from_secs(2);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(400);
@@ -51,6 +53,7 @@ pub enum SuiteApp {
   DeckCraft,
   GridCraft,
   PrintCraft,
+  WordCraft,
 }
 
 /// How Gesso finds the apps: settings, the suite checkout, installed apps, then `PATH`.
@@ -64,7 +67,18 @@ pub struct SuiteLocator {
 }
 
 impl SuiteApp {
-  pub const ALL: [SuiteApp; 9] = [SuiteApp::FilmCraft, SuiteApp::EffectCraft, SuiteApp::PhotoCraft, SuiteApp::LightCraft, SuiteApp::VectorCraft, SuiteApp::DesignCraft, SuiteApp::DeckCraft, SuiteApp::GridCraft, SuiteApp::PrintCraft];
+  pub const ALL: [SuiteApp; 10] = [
+    SuiteApp::FilmCraft,
+    SuiteApp::EffectCraft,
+    SuiteApp::PhotoCraft,
+    SuiteApp::LightCraft,
+    SuiteApp::VectorCraft,
+    SuiteApp::DesignCraft,
+    SuiteApp::DeckCraft,
+    SuiteApp::WordCraft,
+    SuiteApp::GridCraft,
+    SuiteApp::PrintCraft,
+  ];
 
   /// The apps that take a file of this class, most useful first.
   pub fn for_class(class: MediaClass) -> Vec<SuiteApp> {
@@ -82,6 +96,7 @@ impl SuiteApp {
       SuiteApp::DeckCraft => "DeckCraft",
       SuiteApp::GridCraft => "GridCraft",
       SuiteApp::PrintCraft => "PrintCraft",
+      SuiteApp::WordCraft => "WordCraft",
     }
   }
 
@@ -97,6 +112,7 @@ impl SuiteApp {
       SuiteApp::DeckCraft => "Insert on the current slide in DeckCraft",
       SuiteApp::GridCraft => "Insert as a picture in the open GridCraft workbook",
       SuiteApp::PrintCraft => "Make a PDF from the image in PrintCraft",
+      SuiteApp::WordCraft => "Insert at the cursor in the open WordCraft document",
     }
   }
 
@@ -119,6 +135,7 @@ impl SuiteApp {
       SuiteApp::DeckCraft => "deckcraft",
       SuiteApp::GridCraft => "gridcraft",
       SuiteApp::PrintCraft => "pdfcraft",
+      SuiteApp::WordCraft => "wordcraft",
     }
   }
 
@@ -151,15 +168,16 @@ impl SuiteApp {
       SuiteApp::DesignCraft => Some(47_866),
       SuiteApp::DeckCraft => Some(47_867),
       SuiteApp::GridCraft => Some(47_868),
+      SuiteApp::WordCraft => Some(47_869),
       SuiteApp::PrintCraft => None,
     }
   }
 
-  /// Whether the app opens the files named on its command line. DeckCraft and GridCraft open
-  /// presentations and workbooks that way, not images, so they are started empty and sent the
-  /// picture once their control port is up.
+  /// Whether the app opens the files named on its command line. DeckCraft, GridCraft and
+  /// WordCraft open presentations, workbooks and documents that way, not images, so they are
+  /// started empty and sent the picture once their control port is up.
   fn opens_files_on_launch(self) -> bool {
-    !matches!(self, SuiteApp::DeckCraft | SuiteApp::GridCraft)
+    !matches!(self, SuiteApp::DeckCraft | SuiteApp::GridCraft | SuiteApp::WordCraft)
   }
 }
 
@@ -273,8 +291,8 @@ fn requests(app: SuiteApp, files: &[PathBuf]) -> Vec<Vec<Value>> {
     // Relative to the read root (the media folder).
     SuiteApp::PhotoCraft => files.iter().map(|f| vec![json!({"method": "app.open", "params": {"path": f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()}})]).collect(),
     SuiteApp::VectorCraft | SuiteApp::DesignCraft => paths.iter().map(|p| vec![execute("file.place", json!({"path": p})), json!({"method": "app.open", "params": {"path": p}})]).collect(),
-    // A picture each, on the current slide / at the selected cell.
-    SuiteApp::DeckCraft | SuiteApp::GridCraft => paths.iter().map(|p| vec![execute("insert.picture", json!({"path": p}))]).collect(),
+    // A picture each, on the current slide / at the selected cell / at the cursor.
+    SuiteApp::DeckCraft | SuiteApp::GridCraft | SuiteApp::WordCraft => paths.iter().map(|p| vec![execute("insert.picture", json!({"path": p}))]).collect(),
     SuiteApp::PrintCraft => Vec::new(),
   }
 }
@@ -321,6 +339,11 @@ fn send(app: SuiteApp, stream: TcpStream, files: &[PathBuf], token_file: &Path) 
     let token = std::fs::read_to_string(token_file).map_err(|_| "PhotoCraft is running without Gesso's control token. Quit it and try again.".to_owned())?;
     call(json!({"method": "auth", "params": {"token": token.trim()}})).map_err(|_| "PhotoCraft didn't accept Gesso's control token. Quit it and try again.".to_owned())?;
   }
+  if app == SuiteApp::WordCraft {
+    let port = app.port().unwrap_or_default();
+    let key = read_wordcraft_key(port).ok_or_else(|| "Couldn't read WordCraft's control key. Quit WordCraft and try again.".to_owned())?;
+    call(json!({"method": "auth", "key": key})).map_err(|_| "WordCraft didn't accept its control key. Quit WordCraft and try again.".to_owned())?;
+  }
   for attempts in requests(app, files) {
     let mut last = Ok(Value::Null);
     for request in attempts {
@@ -332,6 +355,36 @@ fn send(app: SuiteApp, stream: TcpStream, files: &[PathBuf], token_file: &Path) 
     last.map_err(|e| format!("{}: {e}", app.name()))?;
   }
   Ok(())
+}
+
+/// WordCraft's control key for `port`, waiting briefly for a just-started app to write it.
+fn read_wordcraft_key(port: u16) -> Option<String> {
+  let file = wordcraft_key_file(port)?;
+  let deadline = std::time::Instant::now() + WORDCRAFT_KEY_TIMEOUT;
+  loop {
+    if let Some(key) = std::fs::read_to_string(&file).ok().map(|k| k.trim().to_owned()).filter(|k| !k.is_empty()) {
+      return Some(key);
+    }
+    if std::time::Instant::now() >= deadline {
+      warn!("No WordCraft control key at {}", file.display());
+      return None;
+    }
+    std::thread::sleep(STARTUP_POLL);
+  }
+}
+
+/// Where WordCraft (outside Flatpak) writes the key for `port`: `control-key.local-<port>` in its
+/// preferences folder (`docs/control-protocol.md` in WordCraft).
+fn wordcraft_key_file(port: u16) -> Option<PathBuf> {
+  let home = || std::env::var_os("HOME").map(PathBuf::from);
+  let dir = if cfg!(target_os = "macos") {
+    home()?.join("Library/Application Support/WordCraft")
+  } else if cfg!(windows) {
+    PathBuf::from(std::env::var_os("APPDATA")?).join("WordCraft")
+  } else {
+    std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| home().map(|h| h.join(".config")))?.join("wordcraft")
+  };
+  Some(dir.join(format!("control-key.local-{port}")))
 }
 
 /// The suite checkout containing `exe`: the nearest ancestor with Gesso and FilmCraft side by side
@@ -406,7 +459,7 @@ mod tests {
   fn apps_match_media_classes() {
     assert_eq!(SuiteApp::for_class(MediaClass::Video), vec![SuiteApp::FilmCraft, SuiteApp::EffectCraft]);
     assert_eq!(SuiteApp::for_class(MediaClass::Audio), vec![SuiteApp::FilmCraft, SuiteApp::EffectCraft]);
-    assert_eq!(SuiteApp::for_class(MediaClass::Image).len(), 9);
+    assert_eq!(SuiteApp::for_class(MediaClass::Image).len(), 10);
   }
 
   #[test]
@@ -426,9 +479,9 @@ mod tests {
   }
 
   #[test]
-  fn deckcraft_and_gridcraft_start_empty_and_get_the_picture_over_the_channel() {
+  fn deckcraft_gridcraft_and_wordcraft_start_empty_and_get_the_picture_over_the_channel() {
     let file = PathBuf::from("/m/a.png");
-    for app in [SuiteApp::DeckCraft, SuiteApp::GridCraft] {
+    for app in [SuiteApp::DeckCraft, SuiteApp::GridCraft, SuiteApp::WordCraft] {
       let args = launch_args(app, std::slice::from_ref(&file), Path::new("/t"));
       assert_eq!(args, [OsString::from("--control"), OsString::from(app.port().unwrap().to_string())], "{app:?}");
       let insert = &requests(app, std::slice::from_ref(&file))[0][0];
@@ -469,6 +522,34 @@ mod tests {
     assert_eq!(request["method"], "engine.execute");
     assert_eq!(request["params"]["command"], "file.import");
     assert_eq!(request["params"]["params"]["paths"][0], file.path().to_string_lossy().as_ref());
+  }
+
+  #[test]
+  fn wordcraft_s_key_is_in_its_preferences_folder() {
+    let file = wordcraft_key_file(47_869).unwrap();
+    assert_eq!(file.file_name().unwrap(), "control-key.local-47869");
+    let folder = file.parent().unwrap().file_name().unwrap().to_string_lossy().into_owned();
+    assert!(folder == "wordcraft" || folder == "WordCraft", "{folder}");
+  }
+
+  /// Starts a real WordCraft and inserts a picture through it, as the lightbox button does. Needs
+  /// a display and a build: `WORDCRAFT_BIN=<path> cargo test -p gesso -- --ignored wordcraft`.
+  #[test]
+  #[ignore]
+  fn wordcraft_inserts_the_picture_into_its_document() {
+    let binary = std::env::var_os("WORDCRAFT_BIN").expect("set WORDCRAFT_BIN to a WordCraft build");
+    let locator = SuiteLocator { suite_dir: None, overrides: HashMap::from([("wordcraft".to_owned(), binary.to_string_lossy().into_owned())]) };
+    let picture = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/brand/gesso.png");
+    let message = open_in(SuiteApp::WordCraft, std::slice::from_ref(&picture), &locator, Path::new("/none")).unwrap();
+    assert_eq!(message, "Sent to WordCraft");
+    let key = read_wordcraft_key(47_869).unwrap();
+    let mut stream = connect(47_869).unwrap();
+    writeln!(stream, "{}", json!({"id": 1, "key": key, "method": "document.inspect"})).unwrap();
+    let mut line = String::new();
+    BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+    assert!(line.contains("\"ok\":true"), "{line}");
+    assert!(line.to_ascii_lowercase().contains("picture") || line.contains("image"), "no picture in the document: {}", &line[..line.len().min(600)]);
+    writeln!(stream, "{}", json!({"id": 2, "key": key, "method": "app.quit"})).unwrap();
   }
 
   #[test]

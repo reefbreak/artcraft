@@ -127,22 +127,25 @@ Reel was retired on 2026-09-30; Luma Ray2 needs an S3 bucket). The code is in
 In local mode the lightbox has a **Craft apps** row: send the item to another app in the
 [craft-suite](https://github.com/reefbreak/craft-suite).
 
-| App         | Takes               | What happens                                                  |
-|-------------|---------------------|---------------------------------------------------------------|
-| FilmCraft   | image, video, audio | imported into the open project (`file.import`)                |
-| EffectCraft | image, video, audio | imported into the open project (`file.import`)                |
-| PhotoCraft  | image               | opened as a document (`app.open`)                             |
-| LightCraft  | image               | added to the catalog (`library.import`)                       |
-| VectorCraft | image               | placed in the open document (`file.place`)                    |
-| DesignCraft | image               | placed in the open layout (`file.place`)                      |
-| DeckCraft   | image               | inserted on the current slide (`insert.picture`)              |
-| GridCraft   | image               | inserted as a picture in the open workbook (`insert.picture`) |
-| PrintCraft  | image               | a PDF made from the image (`pdfcraft --create-images`)        |
+| App         | Takes               | What happens                                                   |
+|-------------|---------------------|----------------------------------------------------------------|
+| FilmCraft   | image, video, audio | imported into the open project (`file.import`)                 |
+| EffectCraft | image, video, audio | imported into the open project (`file.import`)                 |
+| PhotoCraft  | image               | opened as a document (`app.open`)                              |
+| LightCraft  | image               | added to the catalog (`library.import`)                        |
+| VectorCraft | image               | placed in the open document (`file.place`)                     |
+| DesignCraft | image               | placed in the open layout (`file.place`)                       |
+| DeckCraft   | image               | inserted on the current slide (`insert.picture`)               |
+| WordCraft   | image               | inserted at the cursor in the open document (`insert.picture`) |
+| GridCraft   | image               | inserted as a picture in the open workbook (`insert.picture`)  |
+| PrintCraft  | image               | a PDF made from the image (`pdfcraft --create-images`)         |
 
 If the app is running from an earlier hand-off, the file goes over its control channel
-(127.0.0.1, ports 47861–47868). Otherwise Gesso starts it with the file and that port. DeckCraft and
-GridCraft don't open images from their command line, so Gesso starts them empty, waits for
-the port, and sends the picture.
+(127.0.0.1, ports 47861–47869). Otherwise Gesso starts it with the file and that port. DeckCraft,
+WordCraft and GridCraft don't open images from their command line, so Gesso starts them empty,
+waits for the port, and sends the picture. WordCraft's channel needs the key it writes to
+`control-key.local-47869` in its preferences folder (`~/Library/Application Support/WordCraft`
+on macOS); Gesso reads it from there.
 PhotoCraft and VectorCraft are started with the library's media folder as their read root, and
 PhotoCraft with a control token in `~/Artcraft/settings/photocraft_control.token`.
 
