@@ -168,9 +168,17 @@ impl VertexClient {
     for model in request.models {
       match self.post_with_token(&base, &omni_body(model, &request), IMAGE_TIMEOUT).await {
         Ok(started) => {
-          let finished = self.wait_for_interaction(&base, started).await?;
-          let file = self.omni_video(&finished).await?;
-          return Ok(OmniEdit { file, model: (*model).to_owned(), usage: omni_usage(&finished) });
+          let id = started.get("id").and_then(Value::as_str).map(str::to_owned);
+          let result = async {
+            let finished = self.wait_for_interaction(&base, started).await?;
+            let file = self.omni_video(&finished).await?;
+            Ok(OmniEdit { file, model: (*model).to_owned(), usage: omni_usage(&finished) })
+          }
+          .await;
+          if let Some(id) = id {
+            self.delete_interaction(&base, &id).await;
+          }
+          return result;
         },
         Err(err) if is_not_found(&err) => {
           info!("Omni model {model} not found on Vertex; trying the next id");
@@ -180,6 +188,18 @@ impl VertexClient {
       }
     }
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No Omni Flash model configured")))
+  }
+
+  /// Removes a stored interaction (the uploaded clip and the result) from Google's side.
+  async fn delete_interaction(&self, base: &str, id: &str) {
+    let Ok(token) = self.token().await else {
+      return;
+    };
+    match self.http.delete(format!("{base}/{id}")).bearer_auth(token).timeout(IMAGE_TIMEOUT).send().await {
+      Ok(response) if response.status().is_success() => {},
+      Ok(response) => warn!("Couldn't delete Omni interaction {id}: {}", response.status()),
+      Err(err) => warn!("Couldn't delete Omni interaction {id}: {err}"),
+    }
   }
 
   /// Polls a background interaction until it has finished.
@@ -291,8 +311,9 @@ fn omni_body(model: &str, request: &OmniEditRequest<'_>) -> Value {
     ],
     "generation_config": { "video_config": { "task": "edit" } },
     "response_format": format,
+    // Background interactions must be stored to be polled; ArtCraft deletes it once it has the video.
     "background": true,
-    "store": false,
+    "store": true,
   })
 }
 
@@ -489,6 +510,7 @@ mod tests {
     assert_eq!(body["input"][1]["text"], "remove the tail");
     assert_eq!(body["generation_config"]["video_config"]["task"], "edit");
     assert_eq!(body["response_format"]["delivery"], "inline");
+    assert_eq!((body["background"].clone(), body["store"].clone()), (json!(true), json!(true)), "Vertex polls only stored background interactions");
     let to_gcs = omni_body("m", &OmniEditRequest { output_gcs_uri: Some("gs://b/out/"), ..request });
     assert_eq!((to_gcs["response_format"]["delivery"].clone(), to_gcs["response_format"]["gcs_uri"].clone()), (json!("uri"), json!("gs://b/out/")));
   }
