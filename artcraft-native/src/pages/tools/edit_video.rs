@@ -1,12 +1,13 @@
-//! Edit Video: trim a clip and join clips on the user's Mac (FFmpeg, free), or extend a clip by
-//! about 7 seconds with Veo on Vertex.
+//! Edit Video: trim a clip and join clips on the user's Mac (FFmpeg, free), extend a clip by
+//! about 7 seconds with Veo, or describe a change ("remove the dog's tail") for Gemini Omni Flash
+//! to make, both on Vertex.
 
 use std::path::PathBuf;
 
 use egui::{Rect, Ui};
 
 use super::{Source, ToolSession};
-use crate::backend::local::tools::{ToolRequest, VeoTier};
+use crate::backend::local::tools::{OMNI_LONGEST_CLIP, OMNI_MAX_SECONDS, OMNI_RESOLUTIONS, ToolRequest, VeoTier, omni_parts};
 use crate::backend::video::{self, VideoPlayer};
 use crate::pages::common::{Env, pick_files};
 use crate::prompt_box::refs::RefKind;
@@ -23,6 +24,7 @@ enum Mode {
   Trim,
   Join,
   Extend,
+  Describe,
 }
 
 #[derive(Default)]
@@ -36,6 +38,10 @@ pub struct EditVideoPage {
   clips: Vec<Source>,
   prompt: String,
   tier: usize,
+  /// The Describe tab's change, resolution (index into `OMNI_RESOLUTIONS`) and sound choice.
+  change: String,
+  resolution: usize,
+  replace_sound: bool,
 }
 
 impl EditVideoPage {
@@ -67,7 +73,12 @@ impl EditVideoPage {
           self.open(path);
         }
         if self.session.busy() {
-          super::busy_overlay(ui, stage, if self.mode == Mode::Extend { "Veo is extending the clip (about a minute)\u{2026}" } else { "Working\u{2026}" });
+          let message = match self.mode {
+            Mode::Extend => "Veo is extending the clip (about a minute)\u{2026}",
+            Mode::Describe => "Gemini Omni Flash is editing the clip (a few minutes)\u{2026}",
+            _ => "Working\u{2026}",
+          };
+          super::busy_overlay(ui, stage, message);
         }
       },
     }
@@ -85,10 +96,12 @@ impl EditVideoPage {
     let duration = self.player.as_ref().and_then(VideoPlayer::duration);
     let has_source = self.session.source.is_some();
     let extend_cost = env.backend.estimate_tool(&ToolRequest::ExtendVideo { video: PathBuf::new(), prompt: String::new(), tier: TIERS[self.tier] });
+    let resolution = OMNI_RESOLUTIONS.get(self.resolution).copied().unwrap_or("720p");
+    let describe_cost = duration.and_then(|seconds| env.backend.estimate_tool(&ToolRequest::DescribeEdit { video: PathBuf::new(), prompt: String::new(), seconds, resolution: resolution.to_owned(), keep_sound: true }));
     let mut run = None;
-    super::panel(ui, rect, "Edit Video", "Trim and join clips on your Mac, or have Veo continue a clip.", |ui| {
-      let modes = [Mode::Trim, Mode::Join, Mode::Extend];
-      if let Some(i) = super::segmented(ui, &["Trim", "Join", "Extend"], modes.iter().position(|m| *m == self.mode).unwrap_or(0)) {
+    super::panel(ui, rect, "Edit Video", "Trim and join clips on your Mac, have Veo continue a clip, or describe a change.", |ui| {
+      let modes = [Mode::Trim, Mode::Join, Mode::Extend, Mode::Describe];
+      if let Some(i) = super::segmented(ui, &["Trim", "Join", "Extend", "Describe"], modes.iter().position(|m| *m == self.mode).unwrap_or(0)) {
         self.mode = modes[i];
       }
       match self.mode {
@@ -157,6 +170,30 @@ impl EditVideoPage {
           if super::run_button(ui, "Extend clip", extend_cost, has_source && !self.prompt.trim().is_empty(), &self.session) {
             if let Some(source) = &self.session.source {
               run = Some(ToolRequest::ExtendVideo { video: source.path.clone(), prompt: self.prompt.trim().to_owned(), tier: TIERS[self.tier] });
+            }
+          }
+        },
+        Mode::Describe => {
+          super::field(ui, "The change");
+          super::prompt_field(ui, "describe-prompt", &mut self.change, "Remove the dog's tail so it has a natural bobtail");
+          super::field(ui, "Resolution");
+          if let Some(i) = super::segmented(ui, &OMNI_RESOLUTIONS, self.resolution.min(OMNI_RESOLUTIONS.len() - 1)) {
+            self.resolution = i;
+          }
+          let mut keep = !self.replace_sound;
+          ui.checkbox(&mut keep, "Keep the clip's own sound");
+          self.replace_sound = !keep;
+          let parts = duration.map_or(0, |d| omni_parts(d).len());
+          let note = match duration {
+            Some(d) if d > OMNI_LONGEST_CLIP + 0.5 => format!("This clip is {d:.0} s; Describe edits take up to {OMNI_LONGEST_CLIP:.0} s. Trim it first."),
+            Some(_) if parts > 1 => format!("Edited in {parts} parts of up to {OMNI_MAX_SECONDS:.0} s, then joined. Each part is redrawn, so details can shift where parts meet. Comes back at 24 fps."),
+            _ => "The whole clip is redrawn with your change, at 24 fps. Fur and background can shift slightly.".to_owned(),
+          };
+          ui.label(egui::RichText::new(note).size(12.0).color(theme::FAINT));
+          let fits = duration.is_some_and(|d| d <= OMNI_LONGEST_CLIP + 0.5);
+          if super::run_button(ui, "Edit clip", describe_cost, has_source && fits && !self.change.trim().is_empty(), &self.session) {
+            if let (Some(source), Some(seconds)) = (&self.session.source, duration) {
+              run = Some(ToolRequest::DescribeEdit { video: source.path.clone(), prompt: self.change.trim().to_owned(), seconds, resolution: resolution.to_owned(), keep_sound: !self.replace_sound });
             }
           }
         },

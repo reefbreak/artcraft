@@ -96,14 +96,24 @@ the cost and how long it took.
 cost, and a strip of results that also land in the library; any local image or video in the lightbox
 has "Open in" buttons for them.
 
-| Page          | What it does                                                               | Runs on                                   |
-|---------------|----------------------------------------------------------------------------|-------------------------------------------|
-| Edit Image    | Describe a change (optional painted mask); inpaint, erase, replace, expand | Vertex (Nano Banana); Bedrock (Stability) |
-| BG Remove     | Transparent cut-out                                                        | Your Mac (ISNet), or Bedrock              |
-| Frame Extract | Marked moments or one frame every N seconds                                | Your Mac (FFmpeg)                         |
-| Edit Video    | Trim, join, extend about 7 s                                               | Your Mac (FFmpeg); Vertex (Veo)           |
-| 3D Stage      | Block a shot with people, shapes and imported GLB/OBJ, then paint it       | Your Mac; Vertex for Generate             |
-| Audio         | 30-second instrumental clips                                               | Vertex (Lyria 2)                          |
+| Page          | What it does                                                                 | Runs on                                            |
+|---------------|------------------------------------------------------------------------------|----------------------------------------------------|
+| Edit Image    | Describe a change (optional painted mask); inpaint, erase, replace, expand   | Vertex (Nano Banana); Bedrock (Stability)          |
+| BG Remove     | Transparent cut-out                                                          | Your Mac (ISNet), or Bedrock                       |
+| Frame Extract | Marked moments or one frame every N seconds                                  | Your Mac (FFmpeg)                                  |
+| Edit Video    | Trim, join, extend about 7 s, or describe a change ("remove the dog's tail") | Your Mac (FFmpeg); Vertex (Veo, Gemini Omni Flash) |
+| 3D Stage      | Block a shot with people, shapes and imported GLB/OBJ, then paint it         | Your Mac; Vertex for Generate                      |
+| Audio         | 30-second instrumental clips                                                 | Vertex (Lyria 2)                                   |
+
+**Describe** (Edit Video) sends the clip to Gemini Omni Flash on Vertex with your change and
+"Keep everything else the same". Omni edits 10 seconds at a time, so longer clips (up to 60 s) are
+cut into even parts of 10 s or less, edited three at a time, and joined; each part is redrawn, so
+details can shift where parts meet. Results come back at 24 fps, at 720p (or 1080p or 360p), with
+the clip's own sound put back unless you untick it. It costs about $0.11 a second at 720p
+(Google's token rates: $1.50/M input, $17.50/M video output). Omni runs on the global endpoint;
+ArtCraft tries the model id `gemini-omni-1.1-flash-preview`, then `gemini-omni-1.1-flash`
+(set `"omni_model"` to pick one). If a result is too big to come back inline, set
+`"omni_output_gcs_uri": "gs://your-bucket/omni/"` and ArtCraft downloads it from there.
 
 FFmpeg (`brew install ffmpeg`) is needed for video previews, Frame Extract and Edit Video. 3D Object
 and 3D World still say "coming soon": they need a 3D generation provider.

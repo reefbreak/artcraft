@@ -21,6 +21,16 @@ pub struct GeminiRates {
   pub image_out: f64,
 }
 
+/// Token counts from an Omni Flash interaction's `usage`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct OmniUsage {
+  pub input_tokens: u64,
+  /// Output tokens of the VIDEO modality.
+  pub video_tokens: u64,
+  /// Any other output tokens (text).
+  pub other_output_tokens: u64,
+}
+
 /// Token counts from a `generateContent` reply's `usageMetadata`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GeminiUsage {
@@ -35,7 +45,8 @@ pub struct GeminiUsage {
 /// Prices, with the user's overrides on top. Override keys in the settings file's `prices` map:
 /// `gemini-3-pro-image.input` / `.text_out` / `.image_out` (per million tokens),
 /// `veo-3.1-fast-generate-001.audio.1080p` (per second; `silent` for no audio),
-/// `stability.stable-image-ultra-v1:1` (per image), `jev.input` (per million tokens).
+/// `stability.stable-image-ultra-v1:1` (per image), `jev.input` (per million tokens),
+/// `gemini-omni-flash.input` / `.text_out` / `.video_out` (per million tokens).
 #[derive(Clone, Debug, Default)]
 pub struct PriceBook {
   overrides: HashMap<String, f64>,
@@ -125,6 +136,25 @@ impl PriceBook {
     Some(self.get(model, base))
   }
 
+  /// Gemini Omni Flash (both 1.1 and the preview) token rates, per million tokens: video counts
+  /// as `image_out`.
+  pub fn omni_rates(&self) -> GeminiRates {
+    GeminiRates { input: self.get("gemini-omni-flash.input", 1.50), text_out: self.get("gemini-omni-flash.text_out", 9.00), image_out: self.get("gemini-omni-flash.video_out", 17.50) }
+  }
+
+  /// An Omni Flash edit of `seconds` of video at `resolution`, before it runs: the input clip
+  /// at 5,792 tokens a second and the output at the resolution's documented rate.
+  pub fn omni_edit_estimate(&self, seconds: f64, resolution: &str) -> f64 {
+    let rates = self.omni_rates();
+    seconds.max(0.0) * (OMNI_INPUT_TOKENS_PER_SECOND as f64 * rates.input + omni_output_tokens_per_second(resolution) as f64 * rates.image_out) / MILLION
+  }
+
+  /// An Omni Flash call from the tokens it reported.
+  pub fn omni_call(&self, usage: OmniUsage) -> f64 {
+    let rates = self.omni_rates();
+    (usage.input_tokens as f64 * rates.input + usage.video_tokens as f64 * rates.image_out + usage.other_output_tokens as f64 * rates.text_out) / MILLION
+  }
+
   /// A Jev routing call: input tokens only (output is free).
   pub fn jev_call(&self, input_tokens: u64) -> f64 {
     input_tokens as f64 * self.get("jev.input", 0.042) / MILLION
@@ -136,6 +166,18 @@ impl PriceBook {
 }
 
 const MILLION: f64 = 1_000_000.0;
+/// Omni Flash bills a second of input video as this many tokens.
+const OMNI_INPUT_TOKENS_PER_SECOND: u64 = 5792;
+
+/// Omni Flash's documented output tokens per second of video (with audio).
+fn omni_output_tokens_per_second(resolution: &str) -> u64 {
+  match resolution {
+    "360p" => 1931,
+    "1080p" => 8688,
+    "4k" => 17376,
+    _ => 5792,
+  }
+}
 
 /// Documented output tokens per image by size (`1K`, `2K`, `4K`, `512`).
 fn gemini_tokens_per_image(model: &str, image_size: Option<&str>) -> u64 {
@@ -180,6 +222,17 @@ mod tests {
     assert_eq!(book.veo_per_second("veo-3.1-generate-001", false, "720p"), Some(0.20));
     assert_eq!(book.stability_per_image("stability.stable-image-core-v1:1"), Some(0.04));
     assert!((book.jev_call(1_000_000) - 0.042).abs() < 1e-12);
+  }
+
+  #[test]
+  fn omni_edits_are_priced_by_seconds_and_resolution() {
+    let book = PriceBook::default();
+    // 10 s at 720p: 57,920 input tokens at $1.50/M plus 57,920 video tokens at $17.50/M.
+    let expected = 57_920.0 * (1.50 + 17.50) / MILLION;
+    assert!((book.omni_edit_estimate(10.0, "720p") - expected).abs() < 1e-9);
+    assert!(book.omni_edit_estimate(10.0, "1080p") > book.omni_edit_estimate(10.0, "720p"));
+    let usage = OmniUsage { input_tokens: 57_920, video_tokens: 57_920, other_output_tokens: 100 };
+    assert!((book.omni_call(usage) - (expected + 100.0 * 9.0 / MILLION)).abs() < 1e-9);
   }
 
   #[test]

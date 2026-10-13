@@ -4,7 +4,8 @@
 //!
 //! Frame extraction, trimming, joining and local background removal run on the user's machine
 //! (FFmpeg and ISNet) and cost nothing. Image edits run on Nano Banana (Vertex) or Stability's
-//! image services (Bedrock); extending a clip runs on Veo (Vertex).
+//! image services (Bedrock); extending a clip runs on Veo (Vertex), and describing an edit to a
+//! clip ("remove the dog's tail") runs on Gemini Omni Flash (Vertex), 10 seconds at a time.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -17,11 +18,21 @@ use super::GeneratedFile;
 use super::RefImage;
 use super::pricing::PriceBook;
 use super::spend::Account;
-use super::vertex::{GeminiImageRequest, VeoRequest};
+use super::vertex::{GeminiImageRequest, OMNI_MODELS, VeoRequest};
 use crate::backend::video;
 
 /// How long a Veo extension adds.
 pub const EXTEND_SECONDS: f64 = 7.0;
+/// The longest clip Omni Flash edits in one call; longer clips are edited in parts.
+pub const OMNI_MAX_SECONDS: f64 = 10.0;
+/// The longest clip a Describe edit takes (six parts), so one click can't run up a large bill.
+pub const OMNI_LONGEST_CLIP: f64 = 60.0;
+/// Omni Flash's shortest output; a shorter final part is merged into the one before it.
+const OMNI_MIN_SECONDS: f64 = 3.0;
+/// Omni Flash's output resolutions offered on the page, the default (720p, native) first.
+pub const OMNI_RESOLUTIONS: [&str; 3] = ["720p", "1080p", "360p"];
+/// Added to every Describe edit, as Google recommends, so only the asked-for change is made.
+const KEEP_THE_REST: &str = "Keep everything else the same.";
 /// What Gemini is told when a mask comes with an edit.
 const MASK_INSTRUCTION: &str = "The second image is a mask. Change only the areas that are white in the mask, blending the edit naturally into its surroundings, and keep everything in the black areas exactly as it is.";
 
@@ -56,6 +67,17 @@ pub enum ToolRequest {
     video: PathBuf,
     prompt: String,
     tier: VeoTier,
+  },
+  /// Edit a clip by describing the change (Gemini Omni Flash). `seconds` is the clip's length,
+  /// for the estimate.
+  DescribeEdit {
+    video: PathBuf,
+    prompt: String,
+    seconds: f64,
+    /// One of [`OMNI_RESOLUTIONS`].
+    resolution: String,
+    /// Put the original clip's sound back (Omni Flash makes its own).
+    keep_sound: bool,
   },
   /// Keep an image (a 3D Stage render) in the library as is.
   SaveImage {
@@ -142,6 +164,7 @@ impl ToolRequest {
       ToolRequest::TrimVideo { .. } => local("tool_trim_video", "Trim", "ffmpeg"),
       ToolRequest::SaveImage { .. } => local("tool_stage_render", "3D Stage render", "stage"),
       ToolRequest::JoinVideos { .. } => local("tool_join_videos", "Join", "ffmpeg"),
+      ToolRequest::DescribeEdit { .. } => ToolRoute { id: "tool_describe_edit", name: "Edit with Gemini Omni Flash", provider: "Vertex AI", upstream: OMNI_MODELS[0], account: Some(Account::Vertex) },
       ToolRequest::ExtendVideo { tier, .. } => ToolRoute {
         id: "tool_extend_video",
         name: match tier {
@@ -169,6 +192,7 @@ impl ToolRequest {
       },
       ToolRequest::EditImage { .. } | ToolRequest::RemoveBackground { engine: BackgroundEngine::Bedrock, .. } => prices.stability_service(route.upstream).unwrap_or(0.0),
       ToolRequest::ExtendVideo { tier, .. } => prices.veo_per_second(tier.model(), true, "720p").unwrap_or(0.0) * EXTEND_SECONDS,
+      ToolRequest::DescribeEdit { seconds, resolution, .. } => prices.omni_edit_estimate(*seconds, resolution),
       _ => 0.0,
     }
   }
@@ -247,6 +271,80 @@ pub fn prepare_for_extension(video: &Path) -> anyhow::Result<Vec<u8>> {
   let scale = format!("scale={tw}:{th}:force_original_aspect_ratio=decrease,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24");
   run_ffmpeg(&["-y", "-loglevel", "error", "-i"], video, &["-vf", &scale, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac"], &out)?;
   Ok(std::fs::read(&out)?)
+}
+
+/// How a clip is cut for Omni Flash: `(start, length)` parts of at most 10 s, as even as
+/// possible, so no part is shorter than Omni's 3-second minimum unless the whole clip is.
+pub fn omni_parts(duration: f64) -> Vec<(f64, f64)> {
+  if !duration.is_finite() || duration <= 0.0 {
+    return Vec::new();
+  }
+  let count = (duration / OMNI_MAX_SECONDS - 1e-6).ceil().max(1.0) as usize;
+  let length = duration / count as f64;
+  debug_assert!(count == 1 || length >= OMNI_MIN_SECONDS);
+  (0..count).map(|i| (i as f64 * length, length)).collect()
+}
+
+/// A clip ready for Omni Flash: its parts as H.264 MP4s (at most 1920 px on the long side), and
+/// whether it's landscape (`16:9`) or portrait (`9:16`).
+pub struct OmniSource {
+  pub parts: Vec<(f64, f64, Vec<u8>)>,
+  pub aspect_ratio: &'static str,
+  pub duration: f64,
+}
+
+pub fn prepare_for_omni(video: &Path) -> anyhow::Result<OmniSource> {
+  anyhow::ensure!(video::ffmpeg_available(), "Describe edits need FFmpeg: install it with `brew install ffmpeg`.");
+  let (w, h, _, duration) = video::probe_file(video).map_err(|e| anyhow::anyhow!("Couldn't read the clip: {e}"))?;
+  anyhow::ensure!(duration > 0.2, "That clip is too short to edit");
+  anyhow::ensure!(duration <= OMNI_LONGEST_CLIP + 0.5, "Describe edits take clips up to {OMNI_LONGEST_CLIP:.0} seconds; trim this one first (Trim tab)");
+  let dir = tempfile::tempdir()?;
+  let scale = "scale='min(1920,iw)':'min(1920,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1";
+  let mut parts = Vec::new();
+  for (i, (start, length)) in omni_parts(duration).into_iter().enumerate() {
+    let out = dir.path().join(format!("part_{i}.mp4"));
+    run_ffmpeg(&["-y", "-loglevel", "error", "-ss", &format!("{start:.3}"), "-i"], video, &["-t", &format!("{length:.3}"), "-vf", scale, "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart"], &out)?;
+    parts.push((start, length, std::fs::read(&out)?));
+  }
+  Ok(OmniSource { parts, aspect_ratio: if h > w { "9:16" } else { "16:9" }, duration })
+}
+
+/// The prompt sent to Omni Flash: the user's words, plus Google's "keep everything else".
+pub fn omni_prompt(prompt: &str) -> String {
+  let prompt = prompt.trim();
+  if prompt.to_ascii_lowercase().contains("keep everything else") {
+    prompt.to_owned()
+  } else {
+    format!("{prompt}{}{KEEP_THE_REST}", if prompt.ends_with('.') { " " } else { ". " })
+  }
+}
+
+/// Omni Flash's edited parts put back together: joined when there are several, then (with
+/// `original`) the original clip's sound laid back over the picture.
+pub fn assemble_omni(edited: Vec<Vec<u8>>, original: Option<&Path>) -> anyhow::Result<GeneratedFile> {
+  let dir = tempfile::tempdir()?;
+  let mut paths = Vec::new();
+  for (i, bytes) in edited.iter().enumerate() {
+    let path = dir.path().join(format!("edited_{i}.mp4"));
+    std::fs::write(&path, bytes)?;
+    paths.push(path);
+  }
+  let joined = match paths.as_slice() {
+    [] => anyhow::bail!("Omni Flash returned no video"),
+    [one] => one.clone(),
+    many => {
+      let path = dir.path().join("joined.mp4");
+      std::fs::write(&path, join_videos(many)?.bytes)?;
+      path
+    },
+  };
+  let Some(original) = original.filter(|o| has_audio(o)) else {
+    return Ok(GeneratedFile { bytes: std::fs::read(&joined)?, extension: "mp4", usage: None });
+  };
+  let out = dir.path().join("with_sound.mp4");
+  let result = video::command("ffmpeg").args(["-y", "-loglevel", "error", "-i"]).arg(&joined).arg("-i").arg(original).args(["-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-shortest", "-movflags", "+faststart"]).arg(&out).stdout(Stdio::null()).stderr(Stdio::piped()).output()?;
+  anyhow::ensure!(result.status.success() && out.exists(), "FFmpeg couldn't put the sound back: {}", String::from_utf8_lossy(&result.stderr).lines().last().unwrap_or("unknown error"));
+  Ok(GeneratedFile { bytes: std::fs::read(&out)?, extension: "mp4", usage: None })
 }
 
 /// Gemini's request for an instruction edit: the image, the mask (if any), and the instruction.
@@ -334,6 +432,65 @@ mod tests {
     assert_eq!(images.len(), 2);
     assert!(prompt.starts_with("make the sky stormy") && prompt.contains("white in the mask"));
     assert_eq!(instruct_parts(image, None, "x").0.len(), 1);
+  }
+
+  #[test]
+  fn describe_edits_are_priced_by_length_and_resolution() {
+    let prices = PriceBook::default();
+    let edit = |seconds: f64, resolution: &str| ToolRequest::DescribeEdit { video: PathBuf::from("a.mp4"), prompt: "remove the tail".into(), seconds, resolution: resolution.into(), keep_sound: true };
+    assert!((edit(10.0, "720p").estimate(&prices) - prices.omni_edit_estimate(10.0, "720p")).abs() < 1e-12);
+    assert!(edit(20.0, "720p").estimate(&prices) > edit(10.0, "720p").estimate(&prices));
+    assert_eq!(edit(10.0, "720p").route().account, Some(Account::Vertex));
+  }
+
+  #[test]
+  fn long_clips_are_cut_into_even_parts_of_ten_seconds_or_less() {
+    assert_eq!(omni_parts(8.0), vec![(0.0, 8.0)]);
+    assert_eq!(omni_parts(10.0), vec![(0.0, 10.0)], "exactly ten is one part");
+    let parts = omni_parts(21.0);
+    assert_eq!(parts.len(), 3);
+    assert!(parts.iter().all(|(_, l)| (*l - 7.0).abs() < 1e-9), "even, not 10 + 10 + 1");
+    assert!((parts[2].0 - 14.0).abs() < 1e-9);
+    assert!(omni_parts(0.0).is_empty() && omni_parts(f64::NAN).is_empty());
+  }
+
+  #[test]
+  fn prompts_ask_to_keep_everything_else() {
+    assert_eq!(omni_prompt(" Remove the dog's tail "), "Remove the dog's tail. Keep everything else the same.");
+    assert_eq!(omni_prompt("Remove the tail."), "Remove the tail. Keep everything else the same.");
+    assert_eq!(omni_prompt("Remove it and keep everything else as is"), "Remove it and keep everything else as is");
+  }
+
+  /// Needs FFmpeg on the PATH: `cargo test -p artcraft_native -- --ignored`.
+  #[test]
+  #[ignore]
+  fn omni_parts_and_reassembly_with_ffmpeg() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("long.mp4");
+    let status = video::command("ffmpeg").args(["-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=s=640x360:d=13:r=30", "-f", "lavfi", "-i", "sine=duration=13", "-shortest", "-pix_fmt", "yuv420p"]).arg(&source).status().unwrap();
+    assert!(status.success());
+    let prepared = prepare_for_omni(&source).unwrap();
+    assert_eq!(prepared.aspect_ratio, "16:9");
+    assert_eq!(prepared.parts.len(), 2);
+    // Stand-ins for Omni's edits: silent copies of each part.
+    let edited: Vec<Vec<u8>> = prepared
+      .parts
+      .iter()
+      .enumerate()
+      .map(|(i, (_, _, bytes))| {
+        let (input, output) = (dir.path().join(format!("in_{i}.mp4")), dir.path().join(format!("out_{i}.mp4")));
+        std::fs::write(&input, bytes).unwrap();
+        assert!(video::command("ffmpeg").args(["-y", "-loglevel", "error", "-i"]).arg(&input).args(["-an", "-c:v", "copy"]).arg(&output).status().unwrap().success());
+        std::fs::read(&output).unwrap()
+      })
+      .collect();
+    let result = assemble_omni(edited, Some(&source)).unwrap();
+    let path = dir.path().join("result.mp4");
+    std::fs::write(&path, &result.bytes).unwrap();
+    let (w, h, _, duration) = video::probe_file(&path).unwrap();
+    assert_eq!((w, h), (640, 360));
+    assert!((duration - 13.0).abs() < 0.4, "{duration}");
+    assert!(has_audio(&path), "the original sound is back");
   }
 
   /// Needs FFmpeg on the PATH: `cargo test -p artcraft_native -- --ignored`.

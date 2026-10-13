@@ -64,17 +64,7 @@ pub struct SuiteLocator {
 }
 
 impl SuiteApp {
-  pub const ALL: [SuiteApp; 9] = [
-    SuiteApp::FilmCraft,
-    SuiteApp::EffectCraft,
-    SuiteApp::PhotoCraft,
-    SuiteApp::LightCraft,
-    SuiteApp::VectorCraft,
-    SuiteApp::DesignCraft,
-    SuiteApp::DeckCraft,
-    SuiteApp::GridCraft,
-    SuiteApp::PrintCraft,
-  ];
+  pub const ALL: [SuiteApp; 9] = [SuiteApp::FilmCraft, SuiteApp::EffectCraft, SuiteApp::PhotoCraft, SuiteApp::LightCraft, SuiteApp::VectorCraft, SuiteApp::DesignCraft, SuiteApp::DeckCraft, SuiteApp::GridCraft, SuiteApp::PrintCraft];
 
   /// The apps that take a file of this class, most useful first.
   pub fn for_class(class: MediaClass) -> Vec<SuiteApp> {
@@ -392,7 +382,9 @@ pub fn mark_imported(inbox: &Path, file: &Path) {
     warn!("Couldn't create {}: {err}", done.display());
     return;
   }
-  let Some(name) = file.file_name() else { return };
+  let Some(name) = file.file_name() else {
+    return;
+  };
   let mut target = done.join(name);
   let mut n = 1;
   while target.exists() {

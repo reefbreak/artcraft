@@ -1,5 +1,6 @@
-//! Google Vertex AI, with the user's own project: Gemini image models (`generateContent`) and Veo
-//! (`predictLongRunning` + `fetchPredictOperation`).
+//! Google Vertex AI, with the user's own project: Gemini image models (`generateContent`), Veo
+//! (`predictLongRunning` + `fetchPredictOperation`), and Gemini Omni Flash video edits (the
+//! Interactions API, `v1beta1/.../interactions`).
 //!
 //! Auth is Application Default Credentials (`gcloud auth application-default login`, a service
 //! account in `GOOGLE_APPLICATION_CREDENTIALS`, or the metadata server). With no project set, an
@@ -18,13 +19,17 @@ use tokio::sync::OnceCell;
 use super::GeneratedFile;
 use super::RefImage;
 use super::config::LocalConfig;
-use super::pricing::GeminiUsage;
+use super::pricing::{GeminiUsage, OmniUsage};
 
 const SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(180);
 const VIDEO_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// Veo jobs not done by then are given up on.
 const VIDEO_GIVE_UP: Duration = Duration::from_secs(20 * 60);
+/// Omni Flash's id on Vertex (the preview the Vertex samples use), then the Gemini API's GA id.
+pub const OMNI_MODELS: [&str; 2] = ["gemini-omni-1.1-flash-preview", "gemini-omni-1.1-flash"];
+/// Omni Flash is served from the global endpoint.
+const OMNI_LOCATION: &str = "global";
 
 /// One Gemini image request (one image comes back per call).
 pub struct GeminiImageRequest<'a> {
@@ -35,6 +40,28 @@ pub struct GeminiImageRequest<'a> {
   pub aspect_ratio: Option<&'a str>,
   /// `1K`, `2K`, `4K`, `512`.
   pub image_size: Option<&'a str>,
+}
+
+/// One Omni Flash edit of a clip (at most 10 s).
+pub struct OmniEditRequest<'a> {
+  /// Tried in order while Vertex says a model isn't found.
+  pub models: &'a [&'a str],
+  pub prompt: &'a str,
+  /// MP4 bytes.
+  pub clip: &'a [u8],
+  /// `360p`, `720p`, `1080p`, `4k`.
+  pub resolution: &'a str,
+  /// `16:9` or `9:16`.
+  pub aspect_ratio: &'a str,
+  /// Results go to `gs://…` and are downloaded, for clips too big to return inline.
+  pub output_gcs_uri: Option<&'a str>,
+}
+
+/// An Omni Flash result: the video, the model that made it, and the tokens it reported.
+pub struct OmniEdit {
+  pub file: GeneratedFile,
+  pub model: String,
+  pub usage: Option<OmniUsage>,
 }
 
 /// One Veo request.
@@ -133,6 +160,59 @@ impl VertexClient {
     Ok(out)
   }
 
+  /// Edits a clip with Gemini Omni Flash and waits for the result.
+  pub async fn edit_video(&self, request: OmniEditRequest<'_>) -> anyhow::Result<OmniEdit> {
+    let project = self.config.gcp_project.as_deref().ok_or_else(|| anyhow::anyhow!("Gemini Omni Flash needs a Google Cloud project in local_providers.json"))?;
+    let base = format!("{}v1beta1/projects/{project}/locations/{OMNI_LOCATION}/interactions", self.host(OMNI_LOCATION));
+    let mut last_error = None;
+    for model in request.models {
+      match self.post_with_token(&base, &omni_body(model, &request), IMAGE_TIMEOUT).await {
+        Ok(started) => {
+          let finished = self.wait_for_interaction(&base, started).await?;
+          let file = self.omni_video(&finished).await?;
+          return Ok(OmniEdit { file, model: (*model).to_owned(), usage: omni_usage(&finished) });
+        },
+        Err(err) if is_not_found(&err) => {
+          info!("Omni model {model} not found on Vertex; trying the next id");
+          last_error = Some(err);
+        },
+        Err(err) => return Err(err),
+      }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No Omni Flash model configured")))
+  }
+
+  /// Polls a background interaction until it has finished.
+  async fn wait_for_interaction(&self, base: &str, mut interaction: Value) -> anyhow::Result<Value> {
+    let deadline = tokio::time::Instant::now() + VIDEO_GIVE_UP;
+    loop {
+      match interaction.get("status").and_then(Value::as_str).unwrap_or("completed") {
+        "completed" => return Ok(interaction),
+        "in_progress" | "queued" => {},
+        other => anyhow::bail!("Omni Flash {}: {}", other.replace('_', " "), interaction_error(&interaction).unwrap_or_else(|| "no reason given".to_owned())),
+      }
+      anyhow::ensure!(tokio::time::Instant::now() < deadline, "Omni Flash didn't finish in time");
+      let id = interaction.get("id").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("Omni Flash didn't return an interaction id"))?.to_owned();
+      tokio::time::sleep(VIDEO_POLL_INTERVAL).await;
+      let token = self.token().await?;
+      match read_json(self.http.get(format!("{base}/{id}")).bearer_auth(token).timeout(IMAGE_TIMEOUT).send().await?).await {
+        Ok(next) => interaction = next,
+        Err(err) if tokio::time::Instant::now() < deadline => warn!("Polling Omni Flash failed (will retry): {err:#}"),
+        Err(err) => return Err(err),
+      }
+    }
+  }
+
+  /// The video in a finished interaction: inline bytes or a `gs://` file.
+  async fn omni_video(&self, interaction: &Value) -> anyhow::Result<GeneratedFile> {
+    match find_video(interaction) {
+      Some(VideoOut::Inline(data)) => Ok(GeneratedFile { bytes: BASE64.decode(data)?, extension: "mp4", usage: None }),
+      Some(VideoOut::Uri(uri)) if uri.starts_with("gs://") => Ok(GeneratedFile { bytes: self.download_gcs(&uri).await?, extension: "mp4", usage: None }),
+      Some(VideoOut::Uri(uri)) => anyhow::bail!("Omni Flash returned a video at {uri}, which ArtCraft can't download"),
+      None => anyhow::bail!("Omni Flash returned no video{}", interaction_error(interaction).map(|e| format!(": {e}")).unwrap_or_default()),
+    }
+  }
+
   /// Makes `count` music clips with Lyria (`predict`, in the video region).
   pub async fn generate_music(&self, model: &str, prompt: &str, negative_prompt: Option<&str>, count: u16) -> anyhow::Result<Vec<GeneratedFile>> {
     let project = self.config.gcp_project.as_deref().ok_or_else(|| anyhow::anyhow!("Lyria needs a Google Cloud project in local_providers.json"))?;
@@ -194,6 +274,70 @@ fn gemini_image_body(request: &GeminiImageRequest<'_>) -> Value {
     "contents": [{ "role": "user", "parts": parts }],
     "generationConfig": { "responseModalities": ["TEXT", "IMAGE"], "imageConfig": image_config },
   })
+}
+
+/// The Interactions API request for an Omni Flash edit.
+fn omni_body(model: &str, request: &OmniEditRequest<'_>) -> Value {
+  let mut format = json!({ "type": "video", "resolution": request.resolution, "aspect_ratio": request.aspect_ratio, "delivery": "inline" });
+  if let Some(uri) = request.output_gcs_uri {
+    format["delivery"] = json!("uri");
+    format["gcs_uri"] = json!(uri);
+  }
+  json!({
+    "model": model,
+    "input": [
+      { "type": "video", "mime_type": "video/mp4", "data": BASE64.encode(request.clip) },
+      { "type": "text", "text": request.prompt },
+    ],
+    "generation_config": { "video_config": { "task": "edit" } },
+    "response_format": format,
+    "background": true,
+    "store": false,
+  })
+}
+
+enum VideoOut {
+  Inline(String),
+  Uri(String),
+}
+
+/// The first video in an interaction's model output (or the SDK-style `output_video`).
+fn find_video(interaction: &Value) -> Option<VideoOut> {
+  let from = |item: &Value| -> Option<VideoOut> {
+    if let Some(data) = item.get("data").and_then(Value::as_str) {
+      return Some(VideoOut::Inline(data.to_owned()));
+    }
+    item.get("uri").and_then(Value::as_str).map(|u| VideoOut::Uri(u.to_owned()))
+  };
+  let steps = interaction.get("steps").and_then(Value::as_array).into_iter().flatten();
+  let in_steps = steps.filter(|s| s.get("type").and_then(Value::as_str).is_none_or(|t| t == "model_output")).flat_map(|s| s.get("content").and_then(Value::as_array).cloned().unwrap_or_default()).filter(|c| c.get("type").and_then(Value::as_str) == Some("video")).find_map(|c| from(&c));
+  in_steps.or_else(|| interaction.get("output_video").and_then(from))
+}
+
+/// The tokens an interaction reports, for the spend meter.
+fn omni_usage(interaction: &Value) -> Option<OmniUsage> {
+  let usage = interaction.get("usage")?;
+  let count = |v: Option<&Value>| v.and_then(Value::as_u64).unwrap_or(0);
+  let by_modality: Vec<&Value> = usage.get("output_tokens_by_modality").and_then(Value::as_array).map(|a| a.iter().collect()).unwrap_or_default();
+  let video_tokens: u64 = by_modality.iter().filter(|m| m.get("modality").and_then(Value::as_str).is_some_and(|m| m.eq_ignore_ascii_case("video"))).map(|m| count(m.get("tokens"))).sum();
+  let total_out = count(usage.get("total_output_tokens"));
+  let input_tokens = count(usage.get("total_input_tokens"));
+  (input_tokens > 0 || total_out > 0).then(|| {
+    let video_tokens = if video_tokens == 0 { total_out } else { video_tokens };
+    OmniUsage { input_tokens, video_tokens, other_output_tokens: total_out.saturating_sub(video_tokens) }
+  })
+}
+
+/// Why an interaction failed, when it says.
+fn interaction_error(interaction: &Value) -> Option<String> {
+  let message = |e: &Value| e.get("message").and_then(Value::as_str).map(str::to_owned);
+  interaction.get("error").and_then(message).or_else(|| interaction.get("errors").and_then(Value::as_array).and_then(|a| a.iter().find_map(message))).or_else(|| interaction.get("steps").and_then(Value::as_array).and_then(|s| s.iter().find_map(|s| s.get("error").and_then(message))))
+}
+
+/// Whether Vertex said the model (or endpoint) doesn't exist.
+fn is_not_found(err: &anyhow::Error) -> bool {
+  let text = err.to_string();
+  text.contains("error 404") || text.contains("NOT_FOUND")
 }
 
 /// Lyria 2's request: the count goes inside the instance (Google's samples), not in parameters.
@@ -335,6 +479,33 @@ mod tests {
     let response = json!({ "usageMetadata": { "promptTokenCount": 12, "candidatesTokenCount": 1130, "thoughtsTokenCount": 200, "candidatesTokensDetails": [{ "modality": "TEXT", "tokenCount": 10 }, { "modality": "IMAGE", "tokenCount": 1120 }] } });
     assert_eq!(usage(&response), Some(GeminiUsage { prompt_tokens: 12, candidates_tokens: 1130, thoughts_tokens: 200, image_tokens: Some(1120) }));
     assert_eq!(usage(&json!({})), None);
+  }
+
+  #[test]
+  fn omni_requests_send_the_clip_and_ask_for_an_edit() {
+    let request = OmniEditRequest { models: &OMNI_MODELS, prompt: "remove the tail", clip: &[1, 2, 3], resolution: "720p", aspect_ratio: "16:9", output_gcs_uri: None };
+    let body = omni_body("gemini-omni-1.1-flash-preview", &request);
+    assert_eq!(body["input"][0], json!({ "type": "video", "mime_type": "video/mp4", "data": "AQID" }));
+    assert_eq!(body["input"][1]["text"], "remove the tail");
+    assert_eq!(body["generation_config"]["video_config"]["task"], "edit");
+    assert_eq!(body["response_format"]["delivery"], "inline");
+    let to_gcs = omni_body("m", &OmniEditRequest { output_gcs_uri: Some("gs://b/out/"), ..request });
+    assert_eq!((to_gcs["response_format"]["delivery"].clone(), to_gcs["response_format"]["gcs_uri"].clone()), (json!("uri"), json!("gs://b/out/")));
+  }
+
+  #[test]
+  fn omni_results_are_found_in_the_model_output() {
+    let done = json!({ "id": "i1", "status": "completed",
+      "steps": [{ "type": "user_input", "content": [{ "type": "video", "data": "AAAA" }] },
+                { "type": "model_output", "content": [{ "type": "text", "text": "ok" }, { "type": "video", "mime_type": "video/mp4", "data": "AQID" }] }],
+      "usage": { "total_input_tokens": 57920, "total_output_tokens": 58000, "output_tokens_by_modality": [{ "modality": "video", "tokens": 57920 }] } });
+    assert!(matches!(find_video(&done), Some(VideoOut::Inline(d)) if d == "AQID"), "the user's own clip is skipped");
+    assert_eq!(omni_usage(&done), Some(OmniUsage { input_tokens: 57920, video_tokens: 57920, other_output_tokens: 80 }));
+    let by_uri = json!({ "steps": [{ "type": "model_output", "content": [{ "type": "video", "uri": "gs://b/o.mp4" }] }] });
+    assert!(matches!(find_video(&by_uri), Some(VideoOut::Uri(u)) if u == "gs://b/o.mp4"));
+    let failed = json!({ "status": "failed", "steps": [{ "type": "model_output", "error": { "code": 3, "message": "blocked by safety filters" } }] });
+    assert_eq!(interaction_error(&failed).as_deref(), Some("blocked by safety filters"));
+    assert!(find_video(&failed).is_none());
   }
 
   #[test]

@@ -392,6 +392,52 @@ impl LocalEngine {
         let file = tokio::task::spawn_blocking(move || tools::join_videos(&videos)).await??;
         (vec![file], 0.0, format!("{count} clips joined \u{b7} on your Mac, free"), MediaClass::Video)
       },
+      ToolRequest::DescribeEdit { video, prompt, resolution, keep_sound, .. } => {
+        let source = video.clone();
+        let prepared = tokio::task::spawn_blocking(move || tools::prepare_for_omni(&source)).await??;
+        let count = prepared.parts.len();
+        if count > 1 {
+          let _ = tx.send(Event::Toast { error: false, message: format!("Editing the clip in {count} parts with Gemini Omni Flash\u{2026}") });
+        }
+        let prompt = tools::omni_prompt(prompt);
+        let models: Vec<&str> = match &self.config.omni_model {
+          Some(model) => vec![model.as_str()],
+          None => vertex::OMNI_MODELS.to_vec(),
+        };
+        let (prompt, models, resolution) = (&prompt, &models, resolution.as_str());
+        let aspect_ratio = prepared.aspect_ratio;
+        let output_gcs_uri = self.config.omni_output_gcs_uri.as_deref();
+        // Up to three parts at a time; results keep the clip's order.
+        let mut edits: Vec<anyhow::Result<(vertex::OmniEdit, f64)>> = Vec::new();
+        for chunk in prepared.parts.chunks(3) {
+          let calls: Vec<_> = chunk.iter().map(|(start, length, clip)| self.omni_part(vertex::OmniEditRequest { models, prompt, clip, resolution, aspect_ratio, output_gcs_uri }, *start, *length, count > 1)).collect();
+          edits.extend(join_all(calls).await);
+        }
+        let mut cost = 0.0;
+        let mut parts = Vec::new();
+        let mut used_model = String::new();
+        let mut failure = None;
+        for edit in edits {
+          match edit {
+            Ok((edit, length)) => {
+              cost += edit.usage.map_or_else(|| self.prices.omni_edit_estimate(length, resolution), |u| self.prices.omni_call(u));
+              used_model = edit.model;
+              parts.push(edit.file.bytes);
+            },
+            Err(err) => failure = failure.or(Some(err)),
+          }
+        }
+        // Parts that ran are billed by Google even when another part failed.
+        if let Some(err) = failure {
+          self.charge(tx, vec![(Account::Vertex, cost, used_model.clone())], &batch);
+          return Err(err);
+        }
+        let original = keep_sound.then(|| video.clone());
+        let file = tokio::task::spawn_blocking(move || tools::assemble_omni(parts, original.as_deref())).await??;
+        info!("Describe edit ran on {used_model}");
+        let basis = format!("{:.1}s at {resolution}{} \u{b7} {used_model}", prepared.duration, if count > 1 { format!(" in {count} parts") } else { String::new() });
+        (vec![file], cost, basis, MediaClass::Video)
+      },
       ToolRequest::ExtendVideo { video, prompt, tier } => {
         let video = video.clone();
         let clip = tokio::task::spawn_blocking(move || tools::prepare_for_extension(&video)).await??;
@@ -410,6 +456,12 @@ impl LocalEngine {
       warn!("Couldn't save the tool record: {err}");
     }
     Ok(saved)
+  }
+
+  /// One part of a Describe edit, with its length (for the estimate when no usage comes back).
+  async fn omni_part(&self, request: vertex::OmniEditRequest<'_>, start: f64, length: f64, labelled: bool) -> anyhow::Result<(vertex::OmniEdit, f64)> {
+    let edit = self.vertex.edit_video(request).await.map_err(|e| if labelled { e.context(format!("Part starting at {start:.1}s")) } else { e })?;
+    Ok((edit, length))
   }
 
   fn load_path(&self, path: &Path) -> anyhow::Result<RefImage> {
