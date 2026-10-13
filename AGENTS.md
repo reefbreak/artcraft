@@ -4,30 +4,28 @@ This file provides guidance for coding agents when working with the Artcraft mon
 
 ## Project Overview
 
-Artcraft is a public-facing Tauri desktop app for generating AI images and video.
-It uses Rust and TypeScript. Backend services, company tooling, and website builds
-live in the separate `artcraft-services` repository.
+Gesso is a pure-Rust (egui) desktop app for generating AI images, video and audio on the user's
+own Google Cloud and AWS accounts. It is a modified version of ArtCraft
+(https://github.com/storytold/artcraft); ArtCraft's Tauri app and web frontend have been removed.
+See `NOTICE` before adding any ArtCraft-branded asset: Gesso must not use ArtCraft's name or logos
+as its own.
 
 ## Project Structure
 
 ```
-artcraft/
+gesso/
 ├── _database/sql/artcraft_migrations/  # Embedded SQLite task database migrations
 ├── .sqlx/                             # SQLite query metadata for offline builds
+├── gesso/                             # The Gesso desktop app (egui), its assets and tests
 ├── crates/
-│   ├── desktop/artcraft/              # Tauri app, configuration, capabilities, icons
-│   ├── api_clients/                  # Desktop provider clients and shared API types
-│   ├── lib/                          # Desktop support libraries
-│   ├── schema/database/sqlite_tasks/ # Desktop task persistence
+│   ├── api_clients/                  # Provider clients and shared API types
+│   ├── lib/                          # Support libraries
+│   ├── schema/database/sqlite_tasks/ # Task persistence
 │   ├── schema/public/                # Shared wire-format enums and identifiers
-│   ├── testing/                      # Shared test helpers
-│   └── vendor/tauri-plugin-http/      # HTTP plugin fork with cookie access
-├── frontend/
-│   ├── apps/artcraft/                # Tauri app frontend and public resources
-│   └── libs/                         # Shared frontend libraries
-├── script/artcraft/                  # Desktop development and build scripts
+│   └── testing/                      # Shared test helpers
+├── script/rust/                      # Test, lint and cleanup scripts
 ├── test_data/                        # Fixtures used by retained crate tests
-└── Cargo.toml                        # Desktop dependency workspace
+└── Cargo.toml                        # Workspace; default member is gesso
 ```
 
 Keep `external/` and `secrets/` untouched. Repository pruning must preserve
@@ -42,9 +40,7 @@ explicitly authorizes a cache cleanup.
 - Never use `println!` or `eprintln!` outside of tests; use `log` crate macros instead
 - When two crates export the same type name, alias imports with a suffix: `use foo::Bar as BarFoo;`
 - Prefer `use` imports over inline fully-qualified paths; only qualify inline for true one-offs or std collisions
-- TypeScript with Nx, React, Vite, Zustand, and Three.js
 - Use two spaces for indentation
-- Each Tauri command belongs in its own file module, named after the command. Keep shared state, types, and helpers in separate support modules; see the [Storyteller command conventions](crates/desktop/artcraft/src/services/storyteller/commands/AGENTS.md).
 
 ### File Layout
 

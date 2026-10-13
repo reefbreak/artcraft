@@ -1,1 +1,0 @@
-export { NewSceneFromTemplate } from "./NewSceneFromTemplate";

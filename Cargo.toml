@@ -16,7 +16,6 @@ members = [
   "crates/api_clients/openai_sora_client",
   "crates/api_clients/worldlabs_api_client",
   "crates/api_clients/worldlabs_consumer_client",
-  "crates/desktop/artcraft",
   "crates/lib/artcraft_client_identity",
   "crates/lib/browser_emulation",
   "crates/lib/build_metadata",
@@ -41,7 +40,6 @@ members = [
   "crates/schema/public/tokens",
   "crates/testing/test_data",
   "crates/testing/test_utils",
-  "crates/vendor/tauri-plugin-http",
 ]
 default-members = ["gesso"]
 
@@ -107,11 +105,6 @@ serde_json = "1.0.149"
 sha2 = "0.11.0-rc.5"
 sha3 = "0.10.8"
 strum = { version = "0.28.0", features = ["derive"] }
-tauri = { version = "2.11.2", features = ["unstable", "devtools", "protocol-asset"] } # NB: "devtools" prevents App Store distribution; "ubstable" is needed for window access
-tauri-plugin-dialog = "2.7.1"
-tauri-plugin-fs = "2.5.1"
-tauri-plugin-log = "2.8.0"
-tauri-plugin-upload = "2.4.0"
 tempdir = "0.3.7"
 tempfile = "3.27.0"
 thiserror = "2.0.18"

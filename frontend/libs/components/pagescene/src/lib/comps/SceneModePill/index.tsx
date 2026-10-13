@@ -1,1 +1,0 @@
-export { SceneModePill } from "./SceneModePill";
