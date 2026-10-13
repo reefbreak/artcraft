@@ -108,6 +108,11 @@ pub enum Event {
     tool_id: u64,
     result: Result<Vec<MediaFile>, String>,
   },
+  /// Local mode: files another Craft app sent arrived in the library.
+  InboxImported {
+    count: usize,
+    from: Option<String>,
+  },
   /// Local mode: spend on the user's own accounts changed.
   Spend(local::spend::SpendSummary),
   Models(Modality, Result<Vec<ModelInfo>, String>),
@@ -231,6 +236,9 @@ impl Backend {
       let _guard = rt.enter();
       Arc::new(LocalEngine::new(&root, config, local::provider_http_client()))
     });
+    if let Some(local) = &local {
+      rt.spawn(watch_inbox(local.clone(), tx.clone(), ctx.clone()));
+    }
     Self { rt, ctx, tx, rx, host, root, creds, http, device_login_cancel: Arc::new(AtomicBool::new(false)), accounts, jobs, local }
   }
 
@@ -255,6 +263,22 @@ impl Backend {
     };
     let _guard = self.rt.enter();
     local.start_tool(tool_id, request, self.tx.clone(), self.ctx.clone());
+  }
+
+  /// Sends library files to another Craft app; the outcome comes back as a toast.
+  pub fn open_in_app(&self, app: local::suite::SuiteApp, tokens: Vec<String>) {
+    let Some(local) = self.local.clone() else {
+      let _ = self.tx.send(Event::Toast { error: true, message: "Opening in the other Craft apps works in local mode.".to_owned() });
+      return;
+    };
+    self.spawn(move |tx| async move {
+      let result = tokio::task::spawn_blocking(move || local.open_in(app, &tokens)).await.unwrap_or_else(|e| Err(e.to_string()));
+      let (error, message) = match result {
+        Ok(message) => (false, message),
+        Err(message) => (true, message),
+      };
+      let _ = tx.send(Event::Toast { error, message });
+    });
   }
 
   /// What a tool run would cost at list prices (local mode).
@@ -924,6 +948,25 @@ impl Backend {
       task(tx).await;
       ctx.request_repaint();
     });
+  }
+}
+
+/// How often the inbox is checked for files the other Craft apps sent.
+const INBOX_POLL: Duration = Duration::from_secs(2);
+
+/// Imports what arrives in `~/Artcraft/inbox`, for as long as the app runs.
+async fn watch_inbox(local: Arc<LocalEngine>, tx: Sender<Event>, ctx: egui::Context) {
+  let mut tick = tokio::time::interval(INBOX_POLL);
+  tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+  loop {
+    tick.tick().await;
+    let engine = local.clone();
+    if let Ok(Some((count, from))) = tokio::task::spawn_blocking(move || engine.import_inbox()).await {
+      if tx.send(Event::InboxImported { count, from }).is_err() {
+        return;
+      }
+      ctx.request_repaint();
+    }
   }
 }
 

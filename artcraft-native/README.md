@@ -112,6 +112,35 @@ Not in local mode yet: audio models, characters, cost estimates, and Bedrock vid
 Reel was retired on 2026-09-30; Luma Ray2 needs an S3 bucket). The code is in
 `src/backend/local/`.
 
+## Craft apps (hand-offs)
+
+In local mode the lightbox has a **Craft apps** row: send the item to another app in the
+[craft-suite](https://github.com/reefbreak/craft-suite).
+
+| App         | Takes                | What happens                                       |
+|-------------|----------------------|----------------------------------------------------|
+| FilmCraft   | image, video, audio  | imported into the open project (`file.import`)     |
+| EffectCraft | image, video, audio  | imported into the open project (`file.import`)     |
+| PhotoCraft  | image                | opened as a document (`app.open`)                  |
+| LightCraft  | image                | added to the catalog (`library.import`)            |
+| VectorCraft | image                | placed in the open document (`file.place`)         |
+| DesignCraft | image                | placed in the open layout (`file.place`)           |
+| PrintCraft  | image                | a PDF made from the image (`pdfcraft --create-images`) |
+
+If the app is running from an earlier hand-off, the file goes over its control channel
+(127.0.0.1, ports 47861–47866). Otherwise ArtCraft starts it with the file and that port.
+PhotoCraft and VectorCraft are started with the library's media folder as their read root, and
+PhotoCraft with a control token in `~/Artcraft/settings/photocraft_control.token`.
+
+ArtCraft finds the apps in this order: `suite_apps` in `local_providers.json` (binary name →
+path), the suite checkout (`suite_dir`, `CRAFT_SUITE_DIR`, or found from ArtCraft's own build:
+`<suite>/<app>/target/{release,debug}/<binary>`), `/Applications/<App>.app`, then `PATH`.
+
+Coming back: FilmCraft (File › Send to ArtCraft) and PhotoCraft (File › Export › Send to
+ArtCraft) write into `~/Artcraft/inbox/`. ArtCraft checks it every 2 seconds, adds new files to
+the library, and moves them to `inbox/imported/`. Anything dropped there by hand is imported
+too. Hidden files and `.part` / `.tmp` files are skipped until they are renamed.
+
 ## Architecture
 
 | Module             | What it does                                                                   |

@@ -247,6 +247,14 @@ impl ArtcraftApp {
       },
       Event::Credits(credits) => self.credits = Some(credits),
       Event::Spend(summary) => self.spend = Some(summary),
+      Event::InboxImported { count, from } => {
+        let what = if count == 1 { "1 file".to_owned() } else { format!("{count} files") };
+        self.toasts.success(match from {
+          Some(app) => format!("{what} from {app} added to your library"),
+          None => format!("{what} added to your library from the inbox"),
+        });
+        self.library.reset();
+      },
       Event::ToolFinished { tool_id, result } => {
         if let Err(message) = &result {
           self.toasts.error(message.clone());
@@ -955,6 +963,7 @@ impl ArtcraftApp {
         },
         None => self.toasts.error("Only files in your local library can be opened in the tools."),
       },
+      LightboxAction::OpenInApp(app) => self.backend.open_in_app(app, vec![item.token.clone()]),
       LightboxAction::Play(url) => {
         if let Err(err) = open::that(&url) {
           self.toasts.error(format!("Couldn't open the video: {err}"));

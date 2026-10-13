@@ -15,10 +15,11 @@ pub mod library;
 pub mod pricing;
 pub mod router;
 pub mod spend;
+pub mod suite;
 pub mod tools;
 pub mod vertex;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -40,6 +41,7 @@ use library::{GenerationRecord, JevRecord, LocalLibrary, MediaClass, NewFile, Or
 use pricing::{GeminiUsage, PriceBook};
 use router::{Decision, Request};
 use spend::{Account, SpendEntry, SpendLedger, SpendSummary};
+use suite::{SuiteApp, SuiteLocator};
 use tools::{BackgroundEngine, EditOp, ToolRequest};
 use vertex::{GeminiImageRequest, VeoRequest, VertexClient};
 
@@ -85,17 +87,26 @@ pub struct LocalEngine {
   prices: PriceBook,
   spend: SpendLedger,
   remover: BackgroundRemover,
+  /// Where the other Craft apps are, for "Open in".
+  suite: SuiteLocator,
+  /// `~/Artcraft`: the inbox and PhotoCraft's control token live under it.
+  data_root: PathBuf,
 }
 
 impl LocalEngine {
   pub fn new(data_root: &Path, config: LocalConfig, http: reqwest::Client) -> Self {
     LocalConfig::write_template_if_missing(data_root);
+    // The other Craft apps' "Send to ArtCraft" drops files here.
+    if let Err(err) = std::fs::create_dir_all(data_root.join(suite::INBOX_DIRECTORY)) {
+      warn!("Couldn't create the inbox: {err}");
+    }
     let jev = config.jev_api_key.clone().map(|key| JevClient::new(http.clone(), key, config.jev_model.clone()));
     info!("Local mode: Vertex {}, Veo {}, Bedrock {}, Jev {}", config.vertex_enabled(), config.veo_enabled(), config.bedrock_enabled(), jev.is_some());
     let library = LocalLibrary::load(data_root);
     let spend = SpendLedger::load(library.dir());
     let remover = BackgroundRemover::new(data_root, http.clone());
-    Self { remover, vertex: VertexClient::new(http, config.clone()), bedrock: BedrockClient::new(config.clone()), jev, jobs: Arc::new(Mutex::new(Vec::new())), prices: PriceBook::new(config.prices.clone()), spend, library, config }
+    let suite = SuiteLocator::new(config.suite_dir.as_deref(), &config.suite_apps);
+    Self { suite, data_root: data_root.to_path_buf(), remover, vertex: VertexClient::new(http, config.clone()), bedrock: BedrockClient::new(config.clone()), jev, jobs: Arc::new(Mutex::new(Vec::new())), prices: PriceBook::new(config.prices.clone()), spend, library, config }
   }
 
   /// Who the app shows as signed in.
@@ -132,6 +143,42 @@ impl LocalEngine {
   /// Where the spend ledger is saved.
   pub fn spend_path(&self) -> &Path {
     self.spend.path()
+  }
+
+  /// Sends library files to another Craft app. Blocking: run it off the UI thread.
+  pub fn open_in(&self, app: SuiteApp, tokens: &[String]) -> Result<String, String> {
+    let files: Vec<PathBuf> = tokens.iter().filter_map(|t| self.library.path_of(t)).collect();
+    suite::open_in(app, &files, &self.suite, &self.data_root)
+  }
+
+  /// Adds the files the other apps sent to the inbox to the library. Returns how many arrived and
+  /// from which app (when all came from one). Blocking.
+  pub fn import_inbox(&self) -> Option<(usize, Option<String>)> {
+    let inbox = self.data_root.join(suite::INBOX_DIRECTORY);
+    let ready = suite::inbox_ready(&inbox, std::time::SystemTime::now());
+    let mut count = 0;
+    let mut senders: Vec<String> = Vec::new();
+    for file in ready {
+      let added = std::fs::read(&file.path).map_err(|e| e.to_string()).and_then(|bytes| {
+        let class = MediaClass::from_extension(&file.extension);
+        if class == MediaClass::Image && image::guess_format(&bytes).is_err() {
+          return Err("not a picture, video or sound".to_owned());
+        }
+        self.library.add(NewFile { bytes: &bytes, extension: &file.extension, class, origin: Origin::Generated, maybe_batch_token: None, maybe_prompt_token: None, maybe_model_id: None }).map_err(|e| e.to_string())
+      });
+      match added {
+        Ok(_) => {
+          count += 1;
+          senders.extend(file.from.clone());
+        },
+        Err(err) => warn!("Skipping {} from the inbox: {err}", file.path.display()),
+      }
+      // Moved either way, so a file that can't be read isn't retried forever.
+      suite::mark_imported(&inbox, &file.path);
+    }
+    senders.sort();
+    senders.dedup();
+    (count > 0).then(|| (count, if senders.len() == 1 { senders.pop() } else { None }))
   }
 
   /// How a batch was routed and what it cost.

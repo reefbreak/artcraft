@@ -57,11 +57,19 @@ pub struct LocalConfig {
   /// Price overrides in USD, keyed as documented on `PriceBook` (e.g. `stability.sd3-5-large-v1:0`).
   #[serde(skip_serializing_if = "HashMap::is_empty")]
   pub prices: HashMap<String, f64>,
+
+  // --- Craft suite hand-offs ---
+  /// The craft-suite checkout, for finding the other apps' builds. `CRAFT_SUITE_DIR`.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub suite_dir: Option<String>,
+  /// A binary per app, overriding the search (keys: `filmcraft`, `photocraft`, `pdfcraft`, …).
+  #[serde(skip_serializing_if = "HashMap::is_empty")]
+  pub suite_apps: HashMap<String, String>,
 }
 
 impl Default for LocalConfig {
   fn default() -> Self {
-    Self { local_mode: true, gcp_project: None, gcp_location: DEFAULT_GCP_LOCATION.to_owned(), gcp_video_location: DEFAULT_GCP_VIDEO_LOCATION.to_owned(), gcp_api_key: None, vertex_base_url: None, bedrock_enabled: None, aws_region: DEFAULT_AWS_REGION.to_owned(), aws_profile: None, jev_api_key: None, jev_model: DEFAULT_JEV_MODEL.to_owned(), jev_min_confidence: DEFAULT_JEV_MIN_CONFIDENCE, prices: HashMap::new() }
+    Self { local_mode: true, gcp_project: None, gcp_location: DEFAULT_GCP_LOCATION.to_owned(), gcp_video_location: DEFAULT_GCP_VIDEO_LOCATION.to_owned(), gcp_api_key: None, vertex_base_url: None, bedrock_enabled: None, aws_region: DEFAULT_AWS_REGION.to_owned(), aws_profile: None, jev_api_key: None, jev_model: DEFAULT_JEV_MODEL.to_owned(), jev_min_confidence: DEFAULT_JEV_MIN_CONFIDENCE, prices: HashMap::new(), suite_dir: None, suite_apps: HashMap::new() }
   }
 }
 
@@ -128,6 +136,9 @@ impl LocalConfig {
     }
     if let Some(url) = var("ARTCRAFT_VERTEX_BASE_URL") {
       self.vertex_base_url = Some(if url.ends_with('/') { url } else { format!("{url}/") });
+    }
+    if let Some(dir) = var("CRAFT_SUITE_DIR") {
+      self.suite_dir = Some(dir);
     }
     if let Some(region) = var("ARTCRAFT_AWS_REGION") {
       self.aws_region = region;

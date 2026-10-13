@@ -4,7 +4,8 @@
 use egui::{Align2, Color32, FontId, Id, Key, Rect, Sense, Stroke, Ui, pos2, vec2};
 
 use crate::backend::audio::AudioPlayer;
-use crate::backend::local::library::GenerationRecord;
+use crate::backend::local::library::{GenerationRecord, MediaClass};
+use crate::backend::local::suite::SuiteApp;
 use crate::backend::media_cache::{Lookup, MediaCache};
 use crate::backend::video::{self, VideoPlayer};
 use crate::backend::wire::Prompt;
@@ -42,6 +43,8 @@ pub enum LightboxAction {
   Play(String),
   /// Open the item in a tool page (local mode).
   OpenIn(Page),
+  /// Send the item to another Craft app (local mode).
+  OpenInApp(SuiteApp),
 }
 
 impl Lightbox {
@@ -303,6 +306,22 @@ impl Lightbox {
           }
         });
       }
+      let class = match item.kind {
+        MediaKind::Image => MediaClass::Image,
+        MediaKind::Video => MediaClass::Video,
+        MediaKind::Audio => MediaClass::Audio,
+      };
+      ui.add_space(12.0);
+      widgets::hud(ui, "Craft apps", theme::FAINT);
+      ui.add_space(4.0);
+      ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+        for app in SuiteApp::for_class(class) {
+          if widgets::button(ui, None, app.name(), widgets::Kind::Secondary, w, theme::CONTROL_H).on_hover_text(app.purpose()).clicked() {
+            actions.push(LightboxAction::OpenInApp(app));
+          }
+        }
+      });
     }
   }
 
